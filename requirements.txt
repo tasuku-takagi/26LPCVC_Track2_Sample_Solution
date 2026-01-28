@@ -1,0 +1,13 @@
+torch==2.7.1
+torchvision==0.22.1
+qai_hub
+qai_hub_models
+onnx
+onnxruntime
+onnxscript
+Pillow
+numpy
+av==16.0.1
+scipy
+pycocotools
+wheel
