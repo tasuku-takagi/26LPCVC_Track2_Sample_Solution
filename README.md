@@ -69,8 +69,9 @@ This will install all the packages used for data preprocessing, model training, 
 
 We modified the following files from the `pytorch/vision` repository:
 
+
 | File                                       | Description                                |
-| ------------------------------------------ | ------------------------------------------ |
+| -------------------------------------------- | -------------------------------------------- |
 | `references/video_classification/train.py` | Training script with custom configurations |
 | `torchvision/datasets/video_utils.py`      | Dynamic frame selection implementation     |
 
@@ -81,6 +82,8 @@ We modified the following files from the `pytorch/vision` repository:
 ### :file_folder: Downloading the QEVD Dataset
 
 To download the QEVD dataset, please refer to the instructions for Qualcomm's [QEVD dataset](https://www.qualcomm.com/developer/software/qevd-dataset) link.
+
+The class labels can be found [here](class_labels.json)
 
 ### :point_right: Refactoring the QEVD Dataset
 
@@ -168,8 +171,9 @@ python references/video_classification/train.py \
 
 ### :gear: Key Parameters
 
+
 | Parameter         | Description                                                    | Example            |
-| ----------------- | -------------------------------------------------------------- | ------------------ |
+| ------------------- | ---------------------------------------------------------------- | -------------------- |
 | `--data-path`     | Path to dataset root (`root/train` or `val/action_categories`) | `./full_dataset/`  |
 | `--resume`        | Path to checkpoint for resuming training                       | `./checkpoint.pth` |
 | `--start-epoch`   | Starting epoch when resuming from checkpoint                   | `10`               |
