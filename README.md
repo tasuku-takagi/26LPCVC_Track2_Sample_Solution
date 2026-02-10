@@ -1,6 +1,6 @@
 # LPCVC-Track-2 :movie_camera: :zap:
 
-This repository contains the solution for LPCVC 2025 Track 2: Video Classification with Dynamic Frame Selection. Our approach modifies PyTorch Vision's video classification pipeline to handle the QEVD dataset with optimized frame sampling.
+This repository contains the solution for LPCVC 2026 Track 2: Video Classification with Dynamic Frame Selection. Our approach modifies PyTorch Vision's video classification pipeline to handle the QEVD dataset with optimized frame sampling.
 
 ## :fire: Overview
 
@@ -55,7 +55,7 @@ conda deactivate
 
 ### Install Dependencies
 
-Run this command to install the Python dependencies regardless if you are in an enviroment
+Run this command to install the Python dependencies regardless if you are in an enviroment:
 
 ```bash
 pip install -r requirements.txt
@@ -69,9 +69,8 @@ This will install all the packages used for data preprocessing, model training, 
 
 We modified the following files from the `pytorch/vision` repository:
 
-
 | File                                       | Description                                |
-| -------------------------------------------- | -------------------------------------------- |
+| ------------------------------------------ | ------------------------------------------ |
 | `references/video_classification/train.py` | Training script with custom configurations |
 | `torchvision/datasets/video_utils.py`      | Dynamic frame selection implementation     |
 
@@ -83,11 +82,28 @@ We modified the following files from the `pytorch/vision` repository:
 
 To download the QEVD dataset, please refer to the instructions for Qualcomm's [QEVD dataset](https://www.qualcomm.com/developer/software/qevd-dataset) link.
 
-The class labels can be found [here](class_labels.json)
-
 ### :point_right: Refactoring the QEVD Dataset
 
 We use `refactor_dataset.py` to organize the QEVD dataset into the required directory structure.
+
+The dataset metadata in `fine_grained_labels_release.json` is a list of per-video entries with a path, label, and split, for example:
+
+```json
+[
+    {
+        "video_path": "./00000000.mp4",
+        "label": "elbow plank",
+        "split": "train"
+    },
+    {
+        "video_path": "./00000008.mp4",
+        "label": "alternating v ups",
+        "split": "train"
+    }
+]
+```
+
+You can build a modified version of this JSON to define custom subsets of QEVD (for example, a smaller label set or a specific split) and then point `refactor_dataset.py` to your filtered file.
 
 ```python
 # Example usage in refactor_dataset.py
@@ -133,27 +149,7 @@ python check_videos.py --root ./full_dataset \
 
 ---
 
-## 3. Dynamic Frame Selection :film_strip:
-
-### :bulb: Key Modification
-
-We modified `compute_clips_for_video()` in `torchvision/datasets/video_utils.py` to implement dynamic frame selection for videos with fewer frames than required.
-
-```python
-# Dynamic frame rate adjustment in video_utils.py
-if total_frames < num_frames:
-    # Calculate video duration
-    video_duration = len(video_pts) / fps
-
-    total_frames = num_frames
-    frame_rate = math.ceil(num_frames / video_duration)
-```
-
-This ensures that short videos are properly sampled by dynamically adjusting the frame rate.
-
----
-
-## 4. Training the Model :weight_lifting:
+## 3. Training the Model :weight_lifting:
 
 ### :point_right: Training Command
 
@@ -171,9 +167,8 @@ python references/video_classification/train.py \
 
 ### :gear: Key Parameters
 
-
 | Parameter         | Description                                                    | Example            |
-| ------------------- | ---------------------------------------------------------------- | -------------------- |
+| ----------------- | -------------------------------------------------------------- | ------------------ |
 | `--data-path`     | Path to dataset root (`root/train` or `val/action_categories`) | `./full_dataset/`  |
 | `--resume`        | Path to checkpoint for resuming training                       | `./checkpoint.pth` |
 | `--start-epoch`   | Starting epoch when resuming from checkpoint                   | `10`               |
@@ -193,7 +188,7 @@ python references/video_classification/train.py \
 
 ---
 
-## 5. Model Validation :white_check_mark:
+## 4. Model Validation :white_check_mark:
 
 ### :point_right: Validation Command
 
