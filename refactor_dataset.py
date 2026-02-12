@@ -79,11 +79,12 @@ def main():
     srcs.append(Path('./dataset/QEVD-FIT-300k-Part-2'))
     srcs.append(Path('./dataset/QEVD-FIT-300k-Part-3'))
     srcs.append(Path('./dataset/QEVD-FIT-300k-Part-4'))
-    dest = Path('./QEVD_organized')
+    dest = Path('./full_dataset')
 
     refactor = DatasetRefactorer(srcs, dest, Path('fine_grained_labels_release.json') )
     refactor.refactor_dataset()
 
 if __name__ == '__main__':
     main()
+
 
