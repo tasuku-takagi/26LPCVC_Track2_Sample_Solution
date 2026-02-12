@@ -1,6 +1,7 @@
 import os
 import torch
 import torchvision
+import onnxscript
 from qai_hub_models.models.resnet_2plus1d import Model
 from torch import nn
 
