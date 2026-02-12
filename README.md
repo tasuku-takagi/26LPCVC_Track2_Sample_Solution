@@ -13,7 +13,7 @@ This repository contains the solution for LPCVC 2026 Track 2: Video Classificati
 
 ## :rocket: Sample Solution
 
-Try out the sample solution consisting of our most recent model checkpoint [here](https://drive.google.com/file/d/1vAJdpMRdJZPOPSkcVDyKu2MXOXb8qyiS/view?usp=drive_link). Read about training and evaluating the solution in the steps below.
+Try out the sample solution consisting of our most recent [model checkpoint](https://drive.google.com/file/d/1vAJdpMRdJZPOPSkcVDyKu2MXOXb8qyiS/view?usp=drive_link). Read about training and evaluating the solution in the steps below.
 
 ---
 
@@ -112,7 +112,7 @@ srcs.append(Path('./dataset/QEVD-FIT-300k-Part-1'))
 srcs.append(Path('./dataset/QEVD-FIT-300k-Part-2'))
 srcs.append(Path('./dataset/QEVD-FIT-300k-Part-3'))
 srcs.append(Path('./dataset/QEVD-FIT-300k-Part-4'))
-dest = Path('./QEVD_organized')
+dest = Path('./full_dataset')
 
 refactor = DatasetRefactorer(srcs, dest, Path('./dataset/fine_grained_labels_release.json'))
 refactor.refactor_dataset()
@@ -170,7 +170,7 @@ python references/video_classification/train.py \
 | Parameter         | Description                                                    | Example            |
 | ----------------- | -------------------------------------------------------------- | ------------------ |
 | `--data-path`     | Path to dataset root (`root/train` or `val/action_categories`) | `./full_dataset/`  |
-| `--resume`        | Path to checkpoint for resuming training                       | `./checkpoint.pth` |
+| `--resume`        | Path to checkpoint for resuming training                       | `./model_29.pth` |
 | `--start-epoch`   | Starting epoch when resuming from checkpoint                   | `10`               |
 | `--weights`       | Pre-trained weights to use                                     | `KINETICS400_V1`   |
 | `--cache-dataset` | Cache processed dataset for faster loading                     | (flag)             |
