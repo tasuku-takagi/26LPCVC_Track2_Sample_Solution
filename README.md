@@ -78,9 +78,9 @@ We modified the following files from the `pytorch/vision` repository:
 
 ## 2. Dataset Preprocessing :open_file_folder:
 
-### :file_folder: Downloading the QEVD Dataset
+### :file_folder: Downloading the QEVD-FIT-300k Dataset
 
-To download the QEVD dataset, please refer to the instructions for Qualcomm's [QEVD dataset](https://www.qualcomm.com/developer/software/qevd-dataset) link.
+To download the QEVD-FIT-300k subset of the QEVD dataset, please refer to the instructions for Qualcomm's [QEVD dataset](https://www.qualcomm.com/developer/software/qevd-dataset) link. 
 
 ### :point_right: Refactoring the QEVD Dataset
 
