@@ -72,13 +72,18 @@ We modified the following files from the `pytorch/vision` repository:
 | File                                       | Description                                |
 | ------------------------------------------ | ------------------------------------------ |
 | `references/video_classification/train.py` | Training script with custom configurations |
-| `torchvision/datasets/video_utils.py`      | Dynamic frame selection implementation     |
 
 ---
 
 ## 2. Dataset Preprocessing :open_file_folder:
 
-### :file_folder: Downloading the QEVD-FIT-300k Dataset
+### :link: Sample Dataset (500 Videos)
+
+Download the sample dataset here: [Sample Dataset](https://drive.google.com/drive/folders/1vp9yVvWEh9An4zjZ3bmFVvH50Ymww8BY?usp=drive_link)
+
+The sample dataset includes 500 videos covering each class with an approximate 80-20 train/val split.
+
+### :file_folder: Downloading the Full QEVD-FIT-300k Dataset
 
 To download the QEVD-FIT-300k subset of the QEVD dataset, please refer to the instructions for Qualcomm's [QEVD dataset](https://www.qualcomm.com/developer/software/qevd-dataset) link. 
 
