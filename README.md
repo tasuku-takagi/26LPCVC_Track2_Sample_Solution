@@ -15,6 +15,12 @@ This repository contains the solution for LPCVC 2026 Track 2: Video Classificati
 
 Try out the sample solution consisting of our most recent [model checkpoint](https://drive.google.com/file/d/1vAJdpMRdJZPOPSkcVDyKu2MXOXb8qyiS/view?usp=drive_link). Read about training and evaluating the solution in the steps below.
 
+## :link: Sample Dataset 
+
+Download the sample dataset here: [Sample Dataset](https://drive.google.com/drive/folders/1vp9yVvWEh9An4zjZ3bmFVvH50Ymww8BY?usp=drive_link)
+
+The sample dataset includes 500 videos covering each class with an approximate 80-20 train/val split.
+
 ---
 
 ## 0. Environment Setup :wrench:
@@ -76,12 +82,6 @@ We modified the following files from the `pytorch/vision` repository:
 ---
 
 ## 2. Dataset Preprocessing :open_file_folder:
-
-### :link: Sample Dataset (500 Videos)
-
-Download the sample dataset here: [Sample Dataset](https://drive.google.com/drive/folders/1vp9yVvWEh9An4zjZ3bmFVvH50Ymww8BY?usp=drive_link)
-
-The sample dataset includes 500 videos covering each class with an approximate 80-20 train/val split.
 
 ### :file_folder: Downloading the Full QEVD-FIT-300k Dataset
 
