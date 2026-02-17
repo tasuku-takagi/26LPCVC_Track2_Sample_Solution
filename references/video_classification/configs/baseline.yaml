@@ -1,0 +1,44 @@
+# Baseline: R2Plus1D-18 fine-tuning on QEVD 92-class
+# Usage: python run_train.py --config configs/baseline.yaml
+
+# --- Data ---
+data_path: ../../../data/qevd/processed/kinetics_92class/
+kinetics_version: "400"
+clip_len: 8
+frame_rate: 4
+clips_per_video: 1
+cache_dataset: true
+
+# --- Model ---
+model: r2plus1d_18
+weights: R2Plus1D_18_Weights.KINETICS400_V1
+device: cuda
+
+# --- Training ---
+batch_size: 24
+epochs: 15
+lr: 0.01
+momentum: 0.9
+weight_decay: 0.0001
+lr_milestones: [20, 30, 40]
+lr_gamma: 0.1
+lr_warmup_epochs: 10
+lr_warmup_method: linear
+lr_warmup_decay: 0.001
+amp: false
+
+# --- Input Resolution ---
+train_resize_size: [128, 171]
+train_crop_size: [112, 112]
+val_resize_size: [128, 171]
+val_crop_size: [112, 112]
+
+# --- Other ---
+workers: 10
+print_freq: 10
+output_dir: .
+resume: ""
+start_epoch: 0
+test_only: false
+sync_bn: false
+use_deterministic_algorithms: false
