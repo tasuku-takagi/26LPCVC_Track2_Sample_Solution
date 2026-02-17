@@ -197,7 +197,7 @@ def main(args):
             args.data_path,
             frames_per_clip=args.clip_len,
             num_classes=args.kinetics_version,
-            split="val", #train
+            split="train",
             step_between_clips=1,
             transform=transform_train,
             frame_rate=args.frame_rate,
@@ -296,9 +296,9 @@ def main(args):
         if not name.startswith("layer4") and not name.startswith("fc"):
             param.requires_grad = False
     
-    #optional model loading
-    model_ckpt = torch.load("./model_14.pth", map_location="cpu", weights_only=False)
-    model.load_state_dict(model_ckpt['model'])
+    # optional model loading
+    # model_ckpt = torch.load("./model_14.pth", map_location="cpu", weights_only=False)
+    # model.load_state_dict(model_ckpt['model'])
     model = model.to(device)
     criterion = nn.CrossEntropyLoss()
 
@@ -368,7 +368,7 @@ def main(args):
             train_sampler.set_epoch(epoch)
         print("Num of Classes", len(dataset.classes))
         train_one_epoch(model, criterion, optimizer, lr_scheduler, data_loader, device, epoch, args.print_freq, scaler)
-        evaluate(model, criterion, data_loader_test, device=device)
+        evaluate(model, criterion, data_loader_test, num_classes, device=device)
         if args.output_dir:
             checkpoint = {
                 "model": model_without_ddp.state_dict(),
