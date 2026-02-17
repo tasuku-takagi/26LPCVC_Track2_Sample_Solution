@@ -301,9 +301,6 @@ def main(args):
         if not name.startswith("layer4") and not name.startswith("fc"):
             param.requires_grad = False
 
-    # optional model loading
-    # model_ckpt = torch.load("./model_14.pth", map_location="cpu", weights_only=False)
-    # model.load_state_dict(model_ckpt['model'])
     model = model.to(device)
     criterion = nn.CrossEntropyLoss()
 
