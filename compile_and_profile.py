@@ -1,35 +1,36 @@
-import qai_hub
-import onnx
 import os
 import sys
 
+import onnx
+import qai_hub
+
 # --- Configuration ---
 ONNX_DIR = "exported_onnx"
-VIDEO_ONNX_NAME = "r2plus1dQEVD"   # change if you named it differently
+VIDEO_ONNX_NAME = "r2plus1dQEVD"  # change if you named it differently
 DEVICE_NAME = "Dragonwing IQ-9075 EVK"
 
 # Must match your export dummy input
 BATCH = 1
 C = 3
-T = 8           # frames (8 if that’s what you exported)
-H = 112         # common for r2plus1d_18
+T = 8  # frames (8 if that’s what you exported)
+H = 112  # common for r2plus1d_18
 W = 112
 # ---------------------
 
+
 def run_profile(model, device):
     profile_job = qai_hub.submit_profile_job(
-        model=model,
-        device=device,
-        options="--max_profiler_iterations 100"
+        model=model, device=device, options="--max_profiler_iterations 100"
     )
     return profile_job.job_id
+
 
 def compile_model(model, device, input_specs):
     compile_job = qai_hub.submit_compile_job(
         model=model,
         device=device,
         input_specs=input_specs,
-        options="--target_runtime onnx"
+        options="--target_runtime onnx",
     )
     return compile_job.job_id
 
@@ -61,9 +62,7 @@ input_specs = {
 
 print("\nSubmitting compilation job to QAI Hub...")
 compile_id = compile_model(
-    model=onnx_video_model,
-    device=device,
-    input_specs=input_specs
+    model=onnx_video_model, device=device, input_specs=input_specs
 )
 print(f"Compilation job ID: {compile_id}")
 
