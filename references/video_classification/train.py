@@ -197,7 +197,7 @@ def main(args):
             args.data_path,
             frames_per_clip=args.clip_len,
             num_classes=args.kinetics_version,
-            split="val", #train
+            split="train", #train
             step_between_clips=1,
             transform=transform_train,
             frame_rate=args.frame_rate,
