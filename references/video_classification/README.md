@@ -33,6 +33,36 @@ torchrun --nproc_per_node=8 train.py --data-path=/data/kinectics400 --kinetics-v
 python train.py --data-path=/data/kinectics400 --kinetics-version="400" --batch-size=8 --cache-dataset
 ```
 
+### WebDataset Mode
+
+事前抽出したフレーム (WebDataset形式) を使用する場合。
+`sample_solution/` ディレクトリから実行:
+
+```bash
+cd sample_solution
+
+# Single GPU
+python references/video_classification/train.py \
+    --data-source webdataset \
+    --webdataset-path ../data/qevd/processed/webdataset \
+    --webdataset-samples 190000 \
+    --weights KINETICS400_V1 \
+    --epochs 15 \
+    --batch-size 24 \
+    --lr 0.01 \
+    --output-dir ../outputs/r2plus1d_webdataset
+
+# Multi GPU
+torchrun --nproc_per_node=4 references/video_classification/train.py \
+    --data-source webdataset \
+    --webdataset-path ../data/qevd/processed/webdataset \
+    --webdataset-samples 190000 \
+    --weights KINETICS400_V1 \
+    --epochs 100 \
+    --batch-size 48 \
+    --lr 0.01 \
+    --output-dir ../outputs/r2plus1d_webdataset
+```
 
 ### Additional Kinetics versions
 

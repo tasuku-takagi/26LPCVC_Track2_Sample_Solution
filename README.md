@@ -152,6 +152,24 @@ python check_videos.py --root ./full_dataset \
     --report bad_videos.csv
 ```
 
+### :package: Creating WebDataset (Optional)
+
+After refactoring, you can create a WebDataset for faster training:
+
+```bash
+./data/qevd/scripts/run_webdataset_pipeline.sh
+```
+
+Output:
+333G    data/qevd/processed/webdataset
+```
+data/qevd/processed/webdataset/
+├── train/
+│   └── shard-{00000..00149}.tar
+└── val/
+    └── shard-{00000..00009}.tar
+```
+
 ---
 
 ## 3. Training the Model :weight_lifting:
