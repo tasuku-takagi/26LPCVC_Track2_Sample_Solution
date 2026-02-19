@@ -1,2 +1,38 @@
-.mp4
+# Videos
+*.mp4
+
+# Logs
 *.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+*.egg
+
+# Environments
+.env
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Model outputs
+*.pth
+*.onnx
+exported_onnx/
+
+# Cache
+.cache/
+*.pt
