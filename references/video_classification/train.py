@@ -62,7 +62,7 @@ def evaluate(model, criterion, data_loader, num_classes, device):
     # Group and aggregate output of a video
     num_videos = len(data_loader.dataset.samples)
     print(f'Evaluating {num_videos} videos\n')
-    #num_classes = len(data_loader.dataset.classes)
+    num_classes = len(data_loader.dataset.classes)
     agg_preds = torch.zeros((num_videos, num_classes), dtype=torch.float32, device=device)
     agg_targets = torch.zeros((num_videos), dtype=torch.int32, device=device)
     with torch.inference_mode():
