@@ -1,5 +1,10 @@
+from __future__ import annotations
+
 import datetime
 import io
+import json
+import logging
+import math
 import os
 import pickle
 import random
@@ -38,42 +43,109 @@ except ImportError:
 class WebDatasetClipSampler:
     """
     WebDatasetのフレームリストからランダムクリップをサンプリング。
-    mp4直接読み込みと同等の動作を再現。
+    mp4直接読み込み (VideoClips) と同等の動作を再現。
+
+    VideoClips._resample_video_idx と同じロジックを使用:
+    - 動画のFPSとターゲットframe_rateを考慮してリサンプリング
+    - 短い動画は動的にframe_rateを調整
     """
 
     def __init__(
         self,
         frames_per_clip: int = 8,
-        frame_rate: int = 4,
+        target_frame_rate: int = 4,
         is_train: bool = True,
     ):
         self.frames_per_clip = frames_per_clip
-        self.frame_rate = frame_rate
+        self.target_frame_rate = target_frame_rate
         self.is_train = is_train
 
-    def __call__(self, frames: list[bytes]) -> list[bytes]:
+    def _resample_video_idx(
+        self, num_output_frames: int, original_fps: float, new_fps: float
+    ) -> list[int]:
+        """
+        VideoClips._resample_video_idx と同等のロジック。
+
+        Args:
+            num_output_frames: リサンプリング後の出力フレーム数
+            original_fps: 元の動画のFPS
+            new_fps: ターゲットFPS
+
+        Returns:
+            元の動画フレームへのインデックスリスト (長さ = num_output_frames)
+        """
+        import math
+        step = original_fps / new_fps
+        if step == int(step):
+            # 整数ステップの場合
+            step = int(step)
+            return [i * step for i in range(num_output_frames)]
+        else:
+            # 非整数ステップ: torch.arange(num_frames) * step と同等
+            idxs = [int(math.floor(i * step)) for i in range(num_output_frames)]
+            return idxs
+
+    def __call__(self, frames: list[bytes], fps: float) -> list[bytes]:
+        """
+        Args:
+            frames: 全フレームのJPEGバイト列リスト
+            fps: 動画の元FPS
+
+        Returns:
+            サンプリングされたフレームのリスト (frames_per_clip個)
+        """
+        import math
+
         total_frames = len(frames)
-        clip_len = self.frames_per_clip * self.frame_rate
+        target_fps = self.target_frame_rate
 
-        if total_frames < clip_len:
-            # フレーム不足時は繰り返しでパディング
-            frames = frames * ((clip_len // total_frames) + 1)
-            total_frames = len(frames)
+        # VideoClips.compute_clips_for_video と同じロジック
+        # リサンプリング後の総フレーム数を計算
+        resampled_total = total_frames * target_fps / fps
 
-        max_start = total_frames - clip_len
+        # 短い動画の場合、frame_rateを動的に調整 (video_utils.py:218-223)
+        if resampled_total < self.frames_per_clip:
+            video_duration = total_frames / fps
+            resampled_total = self.frames_per_clip
+            target_fps = math.ceil(self.frames_per_clip / video_duration)
+
+        # リサンプリングインデックスを計算
+        resampled_indices = self._resample_video_idx(
+            int(math.floor(resampled_total)), fps, target_fps
+        )
+
+        # クリップ可能な範囲を計算
+        num_resampled = len(resampled_indices)
+        if num_resampled < self.frames_per_clip:
+            # それでも足りない場合はインデックスを繰り返し
+            repeat_count = (self.frames_per_clip // num_resampled) + 1
+            resampled_indices = (resampled_indices * repeat_count)[:self.frames_per_clip]
+            num_resampled = len(resampled_indices)
+
+        max_start = num_resampled - self.frames_per_clip
 
         if self.is_train:
-            start = random.randint(0, max_start)
+            start = random.randint(0, max(0, max_start))
         else:
-            start = max_start // 2  # 中央からサンプリング
+            start = max(0, max_start) // 2  # 中央からサンプリング
 
-        indices = [start + i * self.frame_rate for i in range(self.frames_per_clip)]
-        return [frames[i] for i in indices]
+        # クリップのインデックスを取得
+        clip_indices = resampled_indices[start : start + self.frames_per_clip]
+
+        # フレーム範囲を超えないようにクリップ
+        clip_indices = [min(idx, total_frames - 1) for idx in clip_indices]
+
+        return [frames[idx] for idx in clip_indices]
 
 
 class WebDatasetFrameTransform:
     """
-    WebDataset用フレーム変換。presets.VideoClassificationPreset と同等。
+    WebDataset用フレーム変換。presets.VideoClassificationPreset と同等の順序。
+
+    重要: RandomCrop/RandomHorizontalFlip はクリップ内の全フレームに同じ変換を適用する必要がある。
+    フレームごとに異なるクロップ/フリップをすると時間的一貫性が壊れてモデルが動きを学習できない。
+
+    そのため per-frame 変換 (ToTensor, Normalize) と clip-level 変換 (Crop, Flip) を分離。
     """
 
     def __init__(
@@ -84,22 +156,28 @@ class WebDatasetFrameTransform:
         mean = [0.43216, 0.394666, 0.37645]
         std = [0.22803, 0.22145, 0.216989]
 
+        # per-frame: 各フレームに独立適用 (ランダム性なし)
+        self.per_frame = T.Compose([
+            T.ToTensor(),
+            T.Normalize(mean=mean, std=std),
+        ])
+
+        # clip-level: スタック後の [T,C,H,W] テンソルに適用 (全フレーム同じ変換)
         if is_train:
-            self.transform = T.Compose([
-                T.RandomCrop(crop_size),
+            self.clip_transform = T.Compose([
                 T.RandomHorizontalFlip(),
-                T.ToTensor(),
-                T.Normalize(mean=mean, std=std),
+                T.RandomCrop(crop_size),
             ])
         else:
-            self.transform = T.Compose([
-                T.CenterCrop(crop_size),
-                T.ToTensor(),
-                T.Normalize(mean=mean, std=std),
-            ])
+            self.clip_transform = T.CenterCrop(crop_size)
 
-    def __call__(self, img: Image.Image) -> torch.Tensor:
-        return self.transform(img)
+    def transform_frame(self, img: Image.Image) -> torch.Tensor:
+        """1フレームを変換 (ランダム性なし)"""
+        return self.per_frame(img)
+
+    def transform_clip(self, video: torch.Tensor) -> torch.Tensor:
+        """クリップ全体に変換 (Crop/Flip は全フレーム同一座標)"""
+        return self.clip_transform(video)
 
 
 def make_webdataset_transform(
@@ -110,25 +188,37 @@ def make_webdataset_transform(
     """
     WebDatasetのサンプル変換関数を作成。
     mp4版と同じ出力形式: (video, audio, label, video_idx)
+
+    新フォーマット対応: frames.pkl に {"frames": [...], "fps": float} を格納
     """
 
     def transform(sample: dict) -> tuple[torch.Tensor, torch.Tensor, int, int]:
-        # フレームをデコード
+        # フレームとFPSをデコード
         frames_pkl = sample["frames.pkl"]
-        frames: list[bytes] = pickle.loads(frames_pkl)
+        frame_data = pickle.loads(frames_pkl)
 
-        # ランダムクリップをサンプリング
-        sampled_frames = clip_sampler(frames)
+        # 新旧フォーマット対応
+        if isinstance(frame_data, dict):
+            frames: list[bytes] = frame_data["frames"]
+            fps: float = frame_data["fps"]
+        else:
+            # 旧フォーマット (リストのみ) の場合はデフォルトFPS
+            frames = frame_data
+            fps = 30.0
 
-        # 各フレームを変換
+        # FPSを考慮したクリップサンプリング
+        sampled_frames = clip_sampler(frames, fps)
+
+        # 各フレームを変換 (per-frame: ToTensor + Normalize のみ)
         tensors = []
         for frame_bytes in sampled_frames:
             img = Image.open(io.BytesIO(frame_bytes)).convert("RGB")
-            tensors.append(frame_transform(img))
+            tensors.append(frame_transform.transform_frame(img))
 
-        # [T, C, H, W] -> [C, T, H, W] (TCHW -> CTHW)
-        video = torch.stack(tensors, dim=0)  # [T, C, H, W]
-        video = video.permute(1, 0, 2, 3)    # [C, T, H, W]
+        # clip-level 変換 (Crop/Flip を全フレーム同一座標で適用)
+        video = torch.stack(tensors, dim=0)          # [T, C, H, W]
+        video = frame_transform.transform_clip(video) # [T, C, H, W] (cropped)
+        video = video.permute(1, 0, 2, 3)            # [C, T, H, W]
 
         # ラベル
         label_str = sample["cls.txt"].decode("utf-8")
@@ -163,7 +253,7 @@ def create_webdataset_loader(
 
     clip_sampler = WebDatasetClipSampler(
         frames_per_clip=frames_per_clip,
-        frame_rate=frame_rate,
+        target_frame_rate=frame_rate,
         is_train=is_train,
     )
     frame_transform = WebDatasetFrameTransform(
@@ -187,8 +277,9 @@ def create_webdataset_loader(
             .with_epoch(epoch_length if epoch_length else 10000)
         )
     else:
-        # Validationも分散: split_by_nodeで各rankが別シャードを処理
-        # empty_check=False + num_workers=0 (後述) でworker分割問題を回避
+        # Validation: split_by_nodeで各rankが別シャードを処理
+        # シャード数 >= GPU数が前提 (valシャード不足の場合はvalデータを事前に作成すること)
+        # .repeat() + .with_epoch() で全rankが同じイテレーション数を保証
         dataset = (
             wds.WebDataset(shards, shardshuffle=False, nodesplitter=nodesplitter, empty_check=False)
             .map(sample_transform)
@@ -304,6 +395,11 @@ def evaluate_webdataset(model, criterion, data_loader, device, total_iters=None)
 
     metric_logger.synchronize_between_processes()
 
+    # データが空の場合 (分散学習で一部rankにデータが届かない場合) のガード
+    if "acc1" not in metric_logger.meters:
+        print(" * Clip Acc@1 N/A Clip Acc@5 N/A (no data on this rank)")
+        return 0.0
+
     print(
         " * Clip Acc@1 {top1.global_avg:.3f} Clip Acc@5 {top5.global_avg:.3f}".format(
             top1=metric_logger.acc1, top5=metric_logger.acc5
@@ -408,12 +504,61 @@ def collate_fn(batch):
     return default_collate(batch)
 
 
+def setup_logging(output_dir: str, rank: int = 0) -> logging.Logger:
+    """
+    ログディレクトリを作成し、ファイル・コンソール両方に出力するロガーを設定。
+    rank 0 のみファイル出力を行う (分散学習対応)。
+    """
+    log_dir = os.path.join(output_dir, "log")
+    os.makedirs(log_dir, exist_ok=True)
+
+    logger = logging.getLogger("train")
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()
+
+    # コンソール出力
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_fmt = logging.Formatter("%(asctime)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    console_handler.setFormatter(console_fmt)
+    logger.addHandler(console_handler)
+
+    # ファイル出力 (rank 0 のみ)
+    if rank == 0:
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_file = os.path.join(log_dir, f"train_{timestamp}.log")
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(console_fmt)
+        logger.addHandler(file_handler)
+
+        # メトリクス用 JSON Lines ファイル
+        metrics_file = os.path.join(log_dir, f"metrics_{timestamp}.jsonl")
+        logger.metrics_file = metrics_file
+    else:
+        logger.metrics_file = None
+
+    return logger
+
+
+def log_metrics(logger: logging.Logger, epoch: int, metrics: dict) -> None:
+    """メトリクスを JSON Lines 形式でファイルに追記。"""
+    if hasattr(logger, "metrics_file") and logger.metrics_file:
+        record = {"epoch": epoch, **metrics}
+        with open(logger.metrics_file, "a") as f:
+            f.write(json.dumps(record) + "\n")
+
+
 def main(args):
     if args.output_dir:
         utils.mkdir(args.output_dir)
 
     utils.init_distributed_mode(args)
-    print(args)
+
+    # ロガー設定
+    rank = getattr(args, "rank", 0)
+    logger = setup_logging(args.output_dir, rank) if args.output_dir else logging.getLogger("train")
+    logger.info(f"Args: {args}")
 
     device = torch.device(args.device)
 
@@ -450,13 +595,36 @@ def main(args):
         if not train_shard_files:
             raise FileNotFoundError(f"No train shards found in {args.webdataset_path}/train/")
         train_shards = train_shard_files  # リストで渡す
-        val_shards = val_shard_files if val_shard_files else train_shard_files[:1]  # valがなければtrainの一部を使用
+        if not val_shard_files:
+            raise FileNotFoundError(
+                f"No val shards found in {args.webdataset_path}/val/. "
+                "Create val webdataset first with create_webdataset.py --split val"
+            )
+        val_shards = val_shard_files
         print(f"Found {len(train_shard_files)} train shards, {len(val_shard_files)} val shards")
+
+        # val サンプル数を取得 (引数 or meta.txt から自動取得)
+        if args.webdataset_val_samples > 0:
+            val_samples = args.webdataset_val_samples
+        else:
+            val_meta_file = os.path.join(args.webdataset_path, "val", "meta.txt")
+            if os.path.exists(val_meta_file):
+                with open(val_meta_file) as f:
+                    for line in f:
+                        if line.startswith("num_samples:"):
+                            val_samples = int(line.split(":")[1].strip())
+                            break
+                    else:
+                        val_samples = 10000  # fallback
+            else:
+                val_samples = 10000  # fallback
+        print(f"Val samples: {val_samples}")
 
         # 分散学習で各rankが同じイテレーション数になるようepoch_lengthを設定
         # (NCCLデッドロック回避のため必須)
         train_epoch_length = args.webdataset_samples // max(1, args.world_size)
-        val_epoch_length = max(1000, train_epoch_length // 10)  # valはtrainの約10%
+        # val 全体を使用 (切り上げで全サンプルをカバー)
+        val_epoch_length = math.ceil(val_samples / max(1, args.world_size))
 
         print("Creating WebDataset data loaders")
         data_loader = create_webdataset_loader(
@@ -632,8 +800,9 @@ def main(args):
     if args.data_source == "webdataset":
         # WebDatasetはlen()をサポートしないため、サンプル数から推定
         iters_per_epoch = args.webdataset_samples // (args.batch_size * max(1, args.world_size))
-        # valのイテレーション数 (trainの約10%と仮定)
-        val_iters = max(1, iters_per_epoch // 10)
+        # val 全体を評価 (切り上げで全サンプルをカバー)
+        val_iters = math.ceil(val_epoch_length / args.batch_size)
+        logger.info(f"Train iters/epoch: {iters_per_epoch}, Val iters: {val_iters} (samples: {val_samples})")
     else:
         iters_per_epoch = len(data_loader)
         val_iters = None  # mp4モードはlen()サポート
@@ -673,14 +842,17 @@ def main(args):
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
         model_without_ddp = model.module
     # We set weights_only to False because True gave error on cached dataset
+    best_acc1_from_ckpt = 0.0
     if args.resume:
         checkpoint = torch.load(args.resume, map_location="cpu", weights_only=False)
         model_without_ddp.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
         args.start_epoch = checkpoint["epoch"] + 1
+        best_acc1_from_ckpt = checkpoint.get("val_acc1", 0.0)
         if args.amp:
             scaler.load_state_dict(checkpoint["scaler"])
+        logger.info(f"Resumed from epoch {args.start_epoch - 1}, best_acc1 = {best_acc1_from_ckpt:.3f}")
 
     if args.test_only:
         # We disable the cudnn benchmarking because it can noticeably affect the accuracy
@@ -692,12 +864,15 @@ def main(args):
             evaluate(model, criterion, data_loader_test, num_classes, device=device)
         return
 
-    print("Start training")
+    logger.info("Start training")
+    logger.info(f"Num of Classes: {num_classes}")
     start_time = time.time()
+    best_acc1 = best_acc1_from_ckpt if args.resume else 0.0
+
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed and args.data_source == "mp4":
             train_sampler.set_epoch(epoch)
-        print("Num of Classes", num_classes)
+
         train_one_epoch(
             model,
             criterion,
@@ -710,10 +885,15 @@ def main(args):
             scaler,
             total_iters=iters_per_epoch if args.data_source == "webdataset" else None,
         )
+
         if args.data_source == "webdataset":
-            evaluate_webdataset(model, criterion, data_loader_test, device=device, total_iters=val_iters)
+            val_acc1 = evaluate_webdataset(model, criterion, data_loader_test, device=device, total_iters=val_iters)
         else:
-            evaluate(model, criterion, data_loader_test, num_classes, device=device)
+            val_acc1 = evaluate(model, criterion, data_loader_test, num_classes, device=device)
+
+        # メトリクスログ
+        log_metrics(logger, epoch, {"val_acc1": val_acc1})
+
         if args.output_dir:
             checkpoint = {
                 "model": model_without_ddp.state_dict(),
@@ -721,19 +901,28 @@ def main(args):
                 "lr_scheduler": lr_scheduler.state_dict(),
                 "epoch": epoch,
                 "args": args,
+                "val_acc1": val_acc1,
             }
             if args.amp:
                 checkpoint["scaler"] = scaler.state_dict()
+
+            # latest.pth を常に保存
             utils.save_on_master(
-                checkpoint, os.path.join(args.output_dir, f"model_{epoch}.pth")
+                checkpoint, os.path.join(args.output_dir, "latest.pth")
             )
-            utils.save_on_master(
-                checkpoint, os.path.join(args.output_dir, "checkpoint.pth")
-            )
+
+            # best.pth は最良時のみ保存
+            if val_acc1 > best_acc1:
+                best_acc1 = val_acc1
+                utils.save_on_master(
+                    checkpoint, os.path.join(args.output_dir, "best.pth")
+                )
+                logger.info(f"Epoch {epoch}: New best val_acc1 = {val_acc1:.3f}")
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-    print(f"Training time {total_time_str}")
+    logger.info(f"Training time {total_time_str}")
+    logger.info(f"Best val_acc1: {best_acc1:.3f}")
 
 
 def get_args_parser(add_help=True):
@@ -764,6 +953,12 @@ def get_args_parser(add_help=True):
         default=190000,
         type=int,
         help="WebDatasetの学習サンプル数 (LRスケジューラ用、概算でOK)",
+    )
+    parser.add_argument(
+        "--webdataset-val-samples",
+        default=0,
+        type=int,
+        help="WebDatasetの検証サンプル数 (0の場合はmeta.txtから自動取得)",
     )
     parser.add_argument(
         "--kinetics-version",
