@@ -911,11 +911,18 @@ def main(args):
                 checkpoint, os.path.join(args.output_dir, "latest.pth")
             )
 
-            # best.pth は最良時のみ保存
+            # best.pth は最良時のみ保存 (旧ファイルは削除してリネーム)
             if val_acc1 > best_acc1:
+                # 旧 best ファイルを削除
+                if args.output_dir:
+                    import glob as _glob
+                    for old in _glob.glob(os.path.join(args.output_dir, "best_ep*_val1_*.pth")):
+                        os.remove(old)
                 best_acc1 = val_acc1
+                best_name = f"best_ep{epoch:02d}_val1_{val_acc1:.3f}.pth".replace(".", "_", 1)
+                # best_ep52_val1_84_046.pth のような形式 (小数点はアンダースコアに)
                 utils.save_on_master(
-                    checkpoint, os.path.join(args.output_dir, "best.pth")
+                    checkpoint, os.path.join(args.output_dir, best_name)
                 )
                 logger.info(f"Epoch {epoch}: New best val_acc1 = {val_acc1:.3f}")
 
