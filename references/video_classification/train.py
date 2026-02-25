@@ -590,18 +590,22 @@ def main(args):
 
         # シャードパターン (存在するシャードを自動検出)
         import glob
-        train_shard_files = sorted(glob.glob(os.path.join(args.webdataset_path, "train", "shard-*.tar")))
+        if not args.test_only:
+            train_shard_files = sorted(glob.glob(os.path.join(args.webdataset_path, "train", "shard-*.tar")))
+            if not train_shard_files:
+                raise FileNotFoundError(f"No train shards found in {args.webdataset_path}/train/")
+            train_shards = train_shard_files  # リストで渡す
         val_shard_files = sorted(glob.glob(os.path.join(args.webdataset_path, "val", "shard-*.tar")))
-        if not train_shard_files:
-            raise FileNotFoundError(f"No train shards found in {args.webdataset_path}/train/")
-        train_shards = train_shard_files  # リストで渡す
         if not val_shard_files:
             raise FileNotFoundError(
                 f"No val shards found in {args.webdataset_path}/val/. "
                 "Create val webdataset first with create_webdataset.py --split val"
             )
         val_shards = val_shard_files
-        print(f"Found {len(train_shard_files)} train shards, {len(val_shard_files)} val shards")
+        if not args.test_only:
+            print(f"Found {len(train_shard_files)} train shards, {len(val_shard_files)} val shards")
+        else:
+            print(f"Found {len(val_shard_files)} val shards (test-only mode)")
 
         # val サンプル数を取得 (引数 or meta.txt から自動取得)
         if args.webdataset_val_samples > 0:
@@ -622,23 +626,25 @@ def main(args):
 
         # 分散学習で各rankが同じイテレーション数になるようepoch_lengthを設定
         # (NCCLデッドロック回避のため必須)
-        train_epoch_length = args.webdataset_samples // max(1, args.world_size)
+        if not args.test_only:
+            train_epoch_length = args.webdataset_samples // max(1, args.world_size)
         # val 全体を使用 (切り上げで全サンプルをカバー)
         val_epoch_length = math.ceil(val_samples / max(1, args.world_size))
 
-        print("Creating WebDataset data loaders")
-        data_loader = create_webdataset_loader(
-            shards=train_shards,
-            class_to_idx=class_to_idx,
-            batch_size=args.batch_size,
-            num_workers=args.workers,
-            is_train=True,
-            crop_size=train_crop_size,
-            frames_per_clip=args.clip_len,
-            frame_rate=args.frame_rate,
-            distributed=args.distributed,
-            epoch_length=train_epoch_length,
-        )
+        if not args.test_only:
+            print("Creating WebDataset data loaders")
+            data_loader = create_webdataset_loader(
+                shards=train_shards,
+                class_to_idx=class_to_idx,
+                batch_size=args.batch_size,
+                num_workers=args.workers,
+                is_train=True,
+                crop_size=train_crop_size,
+                frames_per_clip=args.clip_len,
+                frame_rate=args.frame_rate,
+                distributed=args.distributed,
+                epoch_length=train_epoch_length,
+            )
         # 分散学習のvalidationではworker=0が最も安全 (シャード分割の問題を回避)
         val_workers = 0 if args.distributed else args.workers
         data_loader_test = create_webdataset_loader(
@@ -660,47 +666,48 @@ def main(args):
     else:
         # mp4 モード (従来の動作)
         val_resize_size = tuple(args.val_resize_size)
-        train_resize_size = tuple(args.train_resize_size)
-
-        train_dir = os.path.join(args.data_path, "train")
         val_dir = os.path.join(args.data_path, "val")
 
-        print("Loading training data")
-        st = time.time()
-        cache_path = _get_cache_path(train_dir, args)
-        transform_train = presets.VideoClassificationPresetTrain(
-            crop_size=train_crop_size, resize_size=train_resize_size
-        )
+        if not args.test_only:
+            train_resize_size = tuple(args.train_resize_size)
+            train_dir = os.path.join(args.data_path, "train")
 
-        if args.cache_dataset and os.path.exists(cache_path):
-            print(f"Loading dataset_train from {cache_path}")
-            dataset, _ = torch.load(cache_path, weights_only=False)
-            dataset.transform = transform_train
-        else:
-            if args.distributed:
-                print(
-                    "It is recommended to pre-compute the dataset cache on a single-gpu first, as it will be faster"
-                )
-            dataset = KineticsWithVideoId(
-                args.data_path,
-                frames_per_clip=args.clip_len,
-                num_classes=args.kinetics_version,
-                split="train",
-                step_between_clips=1,
-                transform=transform_train,
-                frame_rate=args.frame_rate,
-                extensions=(
-                    "avi",
-                    "mp4",
-                ),
-                output_format="TCHW",
+            print("Loading training data")
+            st = time.time()
+            cache_path = _get_cache_path(train_dir, args)
+            transform_train = presets.VideoClassificationPresetTrain(
+                crop_size=train_crop_size, resize_size=train_resize_size
             )
-            if args.cache_dataset:
-                print(f"Saving dataset_train to {cache_path}")
-                utils.mkdir(os.path.dirname(cache_path))
-                utils.save_on_master((dataset, train_dir), cache_path)
 
-        print("Took", time.time() - st)
+            if args.cache_dataset and os.path.exists(cache_path):
+                print(f"Loading dataset_train from {cache_path}")
+                dataset, _ = torch.load(cache_path, weights_only=False)
+                dataset.transform = transform_train
+            else:
+                if args.distributed:
+                    print(
+                        "It is recommended to pre-compute the dataset cache on a single-gpu first, as it will be faster"
+                    )
+                dataset = KineticsWithVideoId(
+                    args.data_path,
+                    frames_per_clip=args.clip_len,
+                    num_classes=args.kinetics_version,
+                    split="train",
+                    step_between_clips=1,
+                    transform=transform_train,
+                    frame_rate=args.frame_rate,
+                    extensions=(
+                        "avi",
+                        "mp4",
+                    ),
+                    output_format="TCHW",
+                )
+                if args.cache_dataset:
+                    print(f"Saving dataset_train to {cache_path}")
+                    utils.mkdir(os.path.dirname(cache_path))
+                    utils.save_on_master((dataset, train_dir), cache_path)
+
+            print("Took", time.time() - st)
 
         print("Loading validation data")
         cache_path = _get_cache_path(val_dir, args)
@@ -742,22 +749,26 @@ def main(args):
                 utils.save_on_master((dataset_test, val_dir), cache_path)
 
         print("Creating data loaders")
-        print("Found", len(dataset), "videos in training dataset")
+        if not args.test_only:
+            print("Found", len(dataset), "videos in training dataset")
         print("Val samples:", len(dataset_test))
-        train_sampler = RandomClipSampler(dataset.video_clips, args.clips_per_video)
+        if not args.test_only:
+            train_sampler = RandomClipSampler(dataset.video_clips, args.clips_per_video)
         test_sampler = UniformClipSampler(dataset_test.video_clips, args.clips_per_video)
         if args.distributed:
-            train_sampler = DistributedSampler(train_sampler)
+            if not args.test_only:
+                train_sampler = DistributedSampler(train_sampler)
             test_sampler = DistributedSampler(test_sampler, shuffle=False)
 
-        data_loader = torch.utils.data.DataLoader(
-            dataset,
-            batch_size=args.batch_size,
-            sampler=train_sampler,
-            num_workers=args.workers,
-            pin_memory=True,
-            collate_fn=collate_fn,
-        )
+        if not args.test_only:
+            data_loader = torch.utils.data.DataLoader(
+                dataset,
+                batch_size=args.batch_size,
+                sampler=train_sampler,
+                num_workers=args.workers,
+                pin_memory=True,
+                collate_fn=collate_fn,
+            )
 
         data_loader_test = torch.utils.data.DataLoader(
             dataset_test,
@@ -768,8 +779,8 @@ def main(args):
             collate_fn=collate_fn,
         )
 
-        num_classes = len(dataset.classes)
-        dataset_classes = dataset.classes
+        num_classes = len(dataset_test.classes)
+        dataset_classes = dataset_test.classes
 
     print("Creating model")
     # num_classes は上で設定済み
@@ -804,7 +815,7 @@ def main(args):
         val_iters = math.ceil(val_epoch_length / args.batch_size)
         logger.info(f"Train iters/epoch: {iters_per_epoch}, Val iters: {val_iters} (samples: {val_samples})")
     else:
-        iters_per_epoch = len(data_loader)
+        iters_per_epoch = 1 if args.test_only else len(data_loader)
         val_iters = None  # mp4モードはlen()サポート
     lr_milestones = [
         iters_per_epoch * (m - args.lr_warmup_epochs) for m in args.lr_milestones
