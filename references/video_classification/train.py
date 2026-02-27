@@ -8,8 +8,15 @@ import math
 import os
 import pickle
 import random
+import sys
 import time
 import warnings
+from pathlib import Path
+
+# src/models.py をインポートするためにリポルートの src/ を sys.path に追加
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+if str(_REPO_ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 import presets
 import torch
@@ -401,9 +408,7 @@ def evaluate_webdataset(model, criterion, data_loader, device, total_iters=None)
         return 0.0
 
     print(
-        " * Clip Acc@1 {top1.global_avg:.3f} Clip Acc@5 {top5.global_avg:.3f}".format(
-            top1=metric_logger.acc1, top5=metric_logger.acc5
-        )
+        f" * Clip Acc@1 {metric_logger.acc1.global_avg:.3f} Clip Acc@5 {metric_logger.acc5.global_avg:.3f}"
     )
     return metric_logger.acc1.global_avg
 
@@ -469,9 +474,7 @@ def evaluate(model, criterion, data_loader, num_classes, device):
     metric_logger.synchronize_between_processes()
 
     print(
-        " * Clip Acc@1 {top1.global_avg:.3f} Clip Acc@5 {top5.global_avg:.3f}".format(
-            top1=metric_logger.acc1, top5=metric_logger.acc5
-        )
+        f" * Clip Acc@1 {metric_logger.acc1.global_avg:.3f} Clip Acc@5 {metric_logger.acc5.global_avg:.3f}"
     )
     # Reduce the agg_preds and agg_targets from all gpu and show result
     agg_preds = utils.reduce_across_processes(agg_preds)
@@ -480,9 +483,7 @@ def evaluate(model, criterion, data_loader, num_classes, device):
     )
     agg_acc1, agg_acc5 = utils.accuracy(agg_preds, agg_targets, topk=(1, 5))
     print(
-        " * Video Acc@1 {acc1:.3f} Video Acc@5 {acc5:.3f}".format(
-            acc1=agg_acc1, acc5=agg_acc5
-        )
+        f" * Video Acc@1 {agg_acc1:.3f} Video Acc@5 {agg_acc5:.3f}"
     )
     return metric_logger.acc1.global_avg
 
@@ -582,7 +583,7 @@ def main(args):
 
         # クラス一覧を読み込み
         classes_file = os.path.join(args.webdataset_path, "classes.txt")
-        with open(classes_file, "r") as f:
+        with open(classes_file) as f:
             classes = [line.strip() for line in f if line.strip()]
         class_to_idx = {c: i for i, c in enumerate(classes)}
         num_classes = len(classes)
@@ -784,16 +785,19 @@ def main(args):
 
     print("Creating model")
     # num_classes は上で設定済み
-    model = torchvision.models.get_model(args.model, weights=args.weights)
+    from models import build_model, freeze_backbone, is_pytorchvideo_model
+
+    pretrained = is_pytorchvideo_model(args.model) and args.weights == "pretrained"
+    weights = None if pretrained else args.weights
+    model = build_model(
+        args.model, num_classes, pretrained=pretrained, weights=weights
+    )
     model.to(device)
     if args.distributed and args.sync_bn:
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-    model.fc = nn.Linear(model.fc.in_features, num_classes)
 
-    # optional layer freezing for faster training
-    for name, param in model.named_parameters():
-        if not name.startswith("layer4") and not name.startswith("fc"):
-            param.requires_grad = False
+    # layer freezing
+    freeze_backbone(model, args.model)
 
     model = model.to(device)
     criterion = nn.CrossEntropyLoss()
