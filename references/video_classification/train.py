@@ -54,14 +54,13 @@ def train_one_epoch(model, criterion, optimizer, lr_scheduler, data_loader, devi
 
 
 
-def evaluate(model, criterion, data_loader, num_classes, device):
+def evaluate(model, criterion, data_loader, device):
     model.eval()
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = "Test:"
     num_processed_samples = 0
     # Group and aggregate output of a video
     num_videos = len(data_loader.dataset.samples)
-    print(f'Evaluating {num_videos} videos\n')
     num_classes = len(data_loader.dataset.classes)
     agg_preds = torch.zeros((num_videos, num_classes), dtype=torch.float32, device=device)
     agg_targets = torch.zeros((num_videos), dtype=torch.int32, device=device)
@@ -101,7 +100,7 @@ def evaluate(model, criterion, data_loader, num_classes, device):
     if (
         hasattr(data_loader.dataset, "__len__")
         and num_data_from_sampler != num_processed_samples
-        and torch.distributed.get_rank() == 0
+        and utils.get_rank() == 0
     ):
         # See FIXME above
         warnings.warn(
@@ -120,9 +119,11 @@ def evaluate(model, criterion, data_loader, num_classes, device):
             top1=metric_logger.acc1, top5=metric_logger.acc5
         )
     )
-    # Reduce the agg_preds and agg_targets from all gpu and show result
-    agg_preds = utils.reduce_across_processes(agg_preds)
-    agg_targets = utils.reduce_across_processes(agg_targets, op=torch.distributed.ReduceOp.MAX)
+    # Reduce the agg_preds and agg_targets from all gpus (safe no-op on single gpu / cpu)
+    if utils.is_dist_avail_and_initialized():
+        torch.distributed.barrier()
+        torch.distributed.all_reduce(agg_preds, op=torch.distributed.ReduceOp.SUM)
+        torch.distributed.all_reduce(agg_targets, op=torch.distributed.ReduceOp.MAX)
     agg_acc1, agg_acc5 = utils.accuracy(agg_preds, agg_targets, topk=(1, 5))
     print(" * Video Acc@1 {acc1:.3f} Video Acc@5 {acc5:.3f}".format(acc1=agg_acc1, acc5=agg_acc5))
     return metric_logger.acc1.global_avg
@@ -296,9 +297,7 @@ def main(args):
         if not name.startswith("layer4") and not name.startswith("fc"):
             param.requires_grad = False
     
-    #optional model loading
-    model_ckpt = torch.load("./model_14.pth", map_location="cpu", weights_only=False)
-    model.load_state_dict(model_ckpt['model'])
+
     model = model.to(device)
     criterion = nn.CrossEntropyLoss()
 
@@ -357,7 +356,7 @@ def main(args):
         # We disable the cudnn benchmarking because it can noticeably affect the accuracy
         torch.backends.cudnn.benchmark = False
         torch.backends.cudnn.deterministic = True
-        evaluate(model, criterion, data_loader_test, num_classes, device=device)
+        evaluate(model, criterion, data_loader_test, device=device)
         return
 
 
@@ -366,7 +365,6 @@ def main(args):
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
-        print("Num of Classes", len(dataset.classes))
         train_one_epoch(model, criterion, optimizer, lr_scheduler, data_loader, device, epoch, args.print_freq, scaler)
         evaluate(model, criterion, data_loader_test, device=device)
         if args.output_dir:
