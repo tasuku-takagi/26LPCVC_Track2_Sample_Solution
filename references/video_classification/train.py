@@ -153,28 +153,45 @@ class WebDatasetFrameTransform:
     フレームごとに異なるクロップ/フリップをすると時間的一貫性が壊れてモデルが動きを学習できない。
 
     そのため per-frame 変換 (ToTensor, Normalize) と clip-level 変換 (Crop, Flip) を分離。
+    ColorJitter は clip 内の全フレームに同一パラメータで適用する (temporal consistency 維持)。
     """
 
     def __init__(
         self,
         crop_size: tuple[int, int] = (112, 112),
         is_train: bool = True,
+        color_jitter: tuple[float, ...] | None = None,
+        random_resized_crop_scale: tuple[float, float] | None = None,
     ):
         mean = [0.43216, 0.394666, 0.37645]
         std = [0.22803, 0.22145, 0.216989]
 
         # per-frame: 各フレームに独立適用 (ランダム性なし)
-        self.per_frame = T.Compose([
-            T.ToTensor(),
-            T.Normalize(mean=mean, std=std),
-        ])
+        # Normalize は ColorJitter の後に適用するため分離
+        self.per_frame = T.ToTensor()
+        self.normalize = T.Normalize(mean=mean, std=std)
+
+        # ColorJitter: clip内の全フレームに同一パラメータで適用
+        # 重要: [0,1] 範囲のテンソルに適用する必要がある (Normalize 前)
+        self.color_jitter = None
+        if is_train and color_jitter is not None:
+            self.color_jitter = T.ColorJitter(*color_jitter)
 
         # clip-level: スタック後の [T,C,H,W] テンソルに適用 (全フレーム同じ変換)
         if is_train:
-            self.clip_transform = T.Compose([
-                T.RandomHorizontalFlip(),
-                T.RandomCrop(crop_size),
-            ])
+            crop_transforms: list = [T.RandomHorizontalFlip()]
+            if random_resized_crop_scale is not None:
+                crop_transforms.append(
+                    T.RandomResizedCrop(
+                        crop_size,
+                        scale=random_resized_crop_scale,
+                        ratio=(0.75, 1.3333),
+                        antialias=False,
+                    )
+                )
+            else:
+                crop_transforms.append(T.RandomCrop(crop_size))
+            self.clip_transform = T.Compose(crop_transforms)
         else:
             self.clip_transform = T.CenterCrop(crop_size)
 
@@ -183,7 +200,40 @@ class WebDatasetFrameTransform:
         return self.per_frame(img)
 
     def transform_clip(self, video: torch.Tensor) -> torch.Tensor:
-        """クリップ全体に変換 (Crop/Flip は全フレーム同一座標)"""
+        """クリップ全体に変換.
+
+        適用順序: ColorJitter ([0,1]範囲) → Normalize → Crop/Flip
+        ColorJitter は全フレーム同一パラメータで temporal consistency を維持。
+        """
+        # 1. ColorJitter (入力は [0,1] 範囲のテンソル)
+        if self.color_jitter is not None:
+            fn_idx, brightness_factor, contrast_factor, saturation_factor, hue_factor = (
+                T.ColorJitter.get_params(
+                    self.color_jitter.brightness,
+                    self.color_jitter.contrast,
+                    self.color_jitter.saturation,
+                    self.color_jitter.hue,
+                )
+            )
+            from torchvision.transforms import functional as F
+            for i in range(video.shape[0]):
+                frame = video[i]  # [C, H, W], [0,1] 範囲
+                for fn_id in fn_idx:
+                    if fn_id == 0 and brightness_factor is not None:
+                        frame = F.adjust_brightness(frame, brightness_factor)
+                    elif fn_id == 1 and contrast_factor is not None:
+                        frame = F.adjust_contrast(frame, contrast_factor)
+                    elif fn_id == 2 and saturation_factor is not None:
+                        frame = F.adjust_saturation(frame, saturation_factor)
+                    elif fn_id == 3 and hue_factor is not None:
+                        frame = F.adjust_hue(frame, hue_factor)
+                video[i] = frame
+
+        # 2. Normalize (ColorJitter の後に適用)
+        for i in range(video.shape[0]):
+            video[i] = self.normalize(video[i])
+
+        # 3. Crop/Flip
         return self.clip_transform(video)
 
 
@@ -251,6 +301,8 @@ def create_webdataset_loader(
     frame_rate: int,
     distributed: bool = False,
     epoch_length: int | None = None,
+    color_jitter: tuple[float, ...] | None = None,
+    random_resized_crop_scale: tuple[float, float] | None = None,
 ) -> torch.utils.data.DataLoader:
     """
     WebDataset DataLoaderを作成。
@@ -266,6 +318,8 @@ def create_webdataset_loader(
     frame_transform = WebDatasetFrameTransform(
         crop_size=crop_size,
         is_train=is_train,
+        color_jitter=color_jitter,
+        random_resized_crop_scale=random_resized_crop_scale,
     )
     sample_transform = make_webdataset_transform(clip_sampler, frame_transform, class_to_idx)
 
@@ -323,10 +377,13 @@ def train_one_epoch(
     print_freq,
     scaler=None,
     total_iters=None,
+    mixup_cutmix=None,
+    ema_model=None,
 ):
     """
     Args:
         total_iters: 総イテレーション数 (WebDatasetなどlen()未サポートの場合に指定)
+        mixup_cutmix: MixUp/CutMix変換 (Noneの場合は適用しない)
     """
     model.train()
     metric_logger = utils.MetricLogger(delimiter="  ")
@@ -340,6 +397,14 @@ def train_one_epoch(
     for video, _, target, _ in metric_logger.log_every(data_loader, print_freq, header, total=total_iters):
         start_time = time.time()
         video, target = video.to(device), target.to(device)
+        if mixup_cutmix is not None:
+            # MixUp/CutMix は 4D (B,C,H,W) を期待するため、
+            # 5D (B,C,T,H,W) を一時的に (B,C*T,H,W) に reshape して適用する。
+            # CutMix の空間マスクは全フレームで共通になり意味的に正しい。
+            B, C, T, H, W = video.shape
+            video_4d = video.reshape(B, C * T, H, W)
+            video_4d, target = mixup_cutmix(video_4d, target)
+            video = video_4d.reshape(B, C, T, H, W)
         with torch.cuda.amp.autocast(enabled=scaler is not None):
             output = model(video)
             loss = criterion(output, target)
@@ -354,12 +419,16 @@ def train_one_epoch(
             loss.backward()
             optimizer.step()
 
-        acc1, acc5 = utils.accuracy(output, target, topk=(1, 5))
+        # MixUp/CutMix 適用時は target が soft label (B, num_classes) になるため argmax で戻す
+        acc_target = target.argmax(dim=1) if target.ndim == 2 else target
+        acc1, acc5 = utils.accuracy(output, acc_target, topk=(1, 5))
         batch_size = video.shape[0]
         metric_logger.update(loss=loss.item(), lr=optimizer.param_groups[0]["lr"])
         metric_logger.meters["acc1"].update(acc1.item(), n=batch_size)
         metric_logger.meters["acc5"].update(acc5.item(), n=batch_size)
         metric_logger.meters["clips/s"].update(batch_size / (time.time() - start_time))
+        if ema_model is not None:
+            ema_model.update_parameters(model)
         lr_scheduler.step()
 
         # WebDataset (.repeat()) は無限なので、total_itersで明示的に終了
@@ -632,6 +701,28 @@ def main(args):
         # val 全体を使用 (切り上げで全サンプルをカバー)
         val_epoch_length = math.ceil(val_samples / max(1, args.world_size))
 
+        # augmentation パラメータ
+        _color_jitter = None
+        cj = getattr(args, 'color_jitter', None)
+        if cj:
+            if len(cj) >= 3:
+                _color_jitter = tuple(cj)
+            else:
+                logger.warning(
+                    f"color_jitter requires >= 3 values (brightness, contrast, saturation[, hue]), "
+                    f"got {len(cj)}. Ignoring."
+                )
+        _rrc_scale = None
+        rrc = getattr(args, 'random_resized_crop_scale', None)
+        if rrc:
+            if len(rrc) == 2:
+                _rrc_scale = tuple(rrc)
+            else:
+                logger.warning(
+                    f"random_resized_crop_scale requires exactly 2 values (min, max), "
+                    f"got {len(rrc)}. Ignoring."
+                )
+
         if not args.test_only:
             print("Creating WebDataset data loaders")
             data_loader = create_webdataset_loader(
@@ -645,6 +736,8 @@ def main(args):
                 frame_rate=args.frame_rate,
                 distributed=args.distributed,
                 epoch_length=train_epoch_length,
+                color_jitter=_color_jitter,
+                random_resized_crop_scale=_rrc_scale,
             )
         # 分散学習のvalidationではworker=0が最も安全 (シャード分割の問題を回避)
         val_workers = 0 if args.distributed else args.workers
@@ -796,11 +889,31 @@ def main(args):
     if args.distributed and args.sync_bn:
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
 
-    # layer freezing
-    freeze_backbone(model, args.model)
+    # layer freezing (config で無効化可能、v4 での全層 fine-tune 用)
+    if getattr(args, 'freeze_backbone', True):
+        freeze_backbone(model, args.model)
+    else:
+        logger.info("Backbone NOT frozen: all parameters are trainable")
 
     model = model.to(device)
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(label_smoothing=getattr(args, 'label_smoothing', 0.0))
+
+    # MixUp / CutMix
+    # alpha=0.0 で各々無効。両方 0.0 なら mixup_cutmix=None (適用なし)。
+    # CutMix は空間領域を矩形で置換するため、動画の時間的一貫性を破壊しうる。
+    # 有効にする場合は小さい alpha (例: 0.2) から試すこと。
+    mixup_cutmix = None
+    mixup_alpha = getattr(args, 'mixup_alpha', 0.0)
+    cutmix_alpha = getattr(args, 'cutmix_alpha', 0.0)
+    if mixup_alpha > 0.0 or cutmix_alpha > 0.0:
+        from torchvision.transforms import v2
+        transforms_list = []
+        if mixup_alpha > 0.0:
+            transforms_list.append(v2.MixUp(alpha=mixup_alpha, num_classes=num_classes))
+        if cutmix_alpha > 0.0:
+            transforms_list.append(v2.CutMix(alpha=cutmix_alpha, num_classes=num_classes))
+        mixup_cutmix = v2.RandomChoice(transforms_list)
+        logger.info(f"MixUp/CutMix enabled: mixup_alpha={mixup_alpha}, cutmix_alpha={cutmix_alpha}")
 
     optimizer = torch.optim.SGD(
         model.parameters(),
@@ -821,12 +934,23 @@ def main(args):
     else:
         iters_per_epoch = 1 if args.test_only else len(data_loader)
         val_iters = None  # mp4モードはlen()サポート
-    lr_milestones = [
-        iters_per_epoch * (m - args.lr_warmup_epochs) for m in args.lr_milestones
-    ]
-    main_lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
-        optimizer, milestones=lr_milestones, gamma=args.lr_gamma
-    )
+    lr_scheduler_type = getattr(args, 'lr_scheduler', 'multistep').lower()
+    if lr_scheduler_type == 'cosine':
+        # CosineAnnealingLR: warmup 後の残りイテレーションで cosine decay
+        cosine_iters = iters_per_epoch * (args.epochs - args.lr_warmup_epochs)
+        eta_min = getattr(args, 'lr_eta_min', 1e-6)
+        main_lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=cosine_iters, eta_min=eta_min
+        )
+        logger.info(f"LR scheduler: CosineAnnealing (T_max={cosine_iters}, eta_min={eta_min})")
+    else:
+        lr_milestones = [
+            iters_per_epoch * (m - args.lr_warmup_epochs) for m in args.lr_milestones
+        ]
+        main_lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
+            optimizer, milestones=lr_milestones, gamma=args.lr_gamma
+        )
+        logger.info(f"LR scheduler: MultiStepLR (milestones={args.lr_milestones})")
 
     if args.lr_warmup_epochs > 0:
         warmup_iters = iters_per_epoch * args.lr_warmup_epochs
@@ -851,6 +975,14 @@ def main(args):
         )
     else:
         lr_scheduler = main_lr_scheduler
+
+    # EMA (Exponential Moving Average)
+    ema_model = None
+    if getattr(args, 'ema_enabled', False):
+        from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
+        ema_decay = getattr(args, 'ema_decay', 0.999)
+        ema_model = AveragedModel(model, multi_avg_fn=get_ema_multi_avg_fn(ema_decay))
+        logger.info(f"EMA enabled: decay={ema_decay}")
 
     model_without_ddp = model
     if args.distributed:
@@ -899,6 +1031,8 @@ def main(args):
             args.print_freq,
             scaler,
             total_iters=iters_per_epoch if args.data_source == "webdataset" else None,
+            mixup_cutmix=mixup_cutmix,
+            ema_model=ema_model,
         )
 
         if args.data_source == "webdataset":
@@ -906,8 +1040,20 @@ def main(args):
         else:
             val_acc1 = evaluate(model, criterion, data_loader_test, num_classes, device=device)
 
+        # EMA モデルでも評価
+        ema_val_acc1 = None
+        if ema_model is not None:
+            if args.data_source == "webdataset":
+                ema_val_acc1 = evaluate_webdataset(ema_model, criterion, data_loader_test, device=device, total_iters=val_iters)
+            else:
+                ema_val_acc1 = evaluate(ema_model, criterion, data_loader_test, num_classes, device=device)
+            logger.info(f"Epoch {epoch}: EMA val_acc1 = {ema_val_acc1:.3f} (base = {val_acc1:.3f})")
+
         # メトリクスログ
-        log_metrics(logger, epoch, {"val_acc1": val_acc1})
+        metrics = {"val_acc1": val_acc1}
+        if ema_val_acc1 is not None:
+            metrics["ema_val_acc1"] = ema_val_acc1
+        log_metrics(logger, epoch, metrics)
 
         if args.output_dir:
             checkpoint = {
@@ -920,6 +1066,8 @@ def main(args):
             }
             if args.amp:
                 checkpoint["scaler"] = scaler.state_dict()
+            if ema_model is not None:
+                checkpoint["ema_model"] = ema_model.state_dict()
 
             # latest.pth を常に保存
             utils.save_on_master(
@@ -927,19 +1075,21 @@ def main(args):
             )
 
             # best.pth は最良時のみ保存 (旧ファイルは削除してリネーム)
-            if val_acc1 > best_acc1:
+            # EMA と通常モデルの良い方で判定
+            effective_acc1 = max(val_acc1, ema_val_acc1) if ema_val_acc1 is not None else val_acc1
+            if effective_acc1 > best_acc1:
                 # 旧 best ファイルを削除
                 if args.output_dir:
                     import glob as _glob
                     for old in _glob.glob(os.path.join(args.output_dir, "best_ep*_val1_*.pth")):
                         os.remove(old)
-                best_acc1 = val_acc1
-                best_name = f"best_ep{epoch:02d}_val1_{val_acc1:.3f}.pth".replace(".", "_", 1)
+                best_acc1 = effective_acc1
+                best_name = f"best_ep{epoch:02d}_val1_{effective_acc1:.3f}.pth".replace(".", "_", 1)
                 # best_ep52_val1_84_046.pth のような形式 (小数点はアンダースコアに)
                 utils.save_on_master(
                     checkpoint, os.path.join(args.output_dir, best_name)
                 )
-                logger.info(f"Epoch {epoch}: New best val_acc1 = {val_acc1:.3f}")
+                logger.info(f"Epoch {epoch}: New best val_acc1 = {effective_acc1:.3f}")
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
@@ -1151,6 +1301,79 @@ def get_args_parser(add_help=True):
         "--amp",
         action="store_true",
         help="Use torch.cuda.amp for mixed precision training",
+    )
+
+    # Label smoothing / MixUp / CutMix
+    parser.add_argument(
+        "--label-smoothing",
+        default=0.0,
+        type=float,
+        help="label smoothing factor (default: 0.0)",
+    )
+    parser.add_argument(
+        "--mixup-alpha",
+        default=0.0,
+        type=float,
+        help="MixUp alpha (0.0 = disabled, default: 0.0)",
+    )
+    parser.add_argument(
+        "--cutmix-alpha",
+        default=0.0,
+        type=float,
+        help="CutMix alpha (0.0 = disabled, default: 0.0)",
+    )
+
+    # LR scheduler
+    parser.add_argument(
+        "--lr-scheduler",
+        default="multistep",
+        type=str,
+        choices=["multistep", "cosine"],
+        help="LR scheduler type (default: multistep)",
+    )
+    parser.add_argument(
+        "--lr-eta-min",
+        default=1e-6,
+        type=float,
+        help="minimum LR for CosineAnnealingLR (default: 1e-6)",
+    )
+
+    # EMA
+    parser.add_argument(
+        "--ema-enabled",
+        action="store_true",
+        help="Enable Exponential Moving Average of model weights",
+    )
+    parser.add_argument(
+        "--ema-decay",
+        default=0.999,
+        type=float,
+        help="EMA decay factor (default: 0.999)",
+    )
+
+    # Augmentation
+    parser.add_argument(
+        "--color-jitter",
+        nargs="+",
+        default=None,
+        type=float,
+        help="ColorJitter params: brightness contrast saturation [hue] (default: disabled)",
+    )
+    parser.add_argument(
+        "--random-resized-crop-scale",
+        nargs=2,
+        default=None,
+        type=float,
+        metavar=("MIN", "MAX"),
+        help="RandomResizedCrop scale range (default: disabled, use RandomCrop)",
+    )
+
+    # Backbone freezing
+    parser.add_argument(
+        "--freeze-backbone",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Freeze backbone layers (default: True). Use --no-freeze-backbone to unfreeze.",
     )
 
     return parser
