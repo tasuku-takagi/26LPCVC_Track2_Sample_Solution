@@ -1078,14 +1078,14 @@ def main(args):
             # EMA と通常モデルの良い方で判定
             effective_acc1 = max(val_acc1, ema_val_acc1) if ema_val_acc1 is not None else val_acc1
             if effective_acc1 > best_acc1:
-                # 旧 best ファイルを削除
-                if args.output_dir:
-                    import glob as _glob
-                    for old in _glob.glob(os.path.join(args.output_dir, "best_ep*_val1_*.pth")):
-                        os.remove(old)
                 best_acc1 = effective_acc1
                 best_name = f"best_ep{epoch:02d}_val1_{effective_acc1:.3f}.pth".replace(".", "_", 1)
                 # best_ep52_val1_84_046.pth のような形式 (小数点はアンダースコアに)
+                # DDP時は master のみファイル操作 (他ランクが先に削除するとFileNotFoundError)
+                if not args.distributed or args.rank == 0:
+                    import glob as _glob
+                    for old in _glob.glob(os.path.join(args.output_dir, "best_ep*_val1_*.pth")):
+                        os.remove(old)
                 utils.save_on_master(
                     checkpoint, os.path.join(args.output_dir, best_name)
                 )
