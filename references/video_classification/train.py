@@ -38,6 +38,7 @@ from torchvision.datasets.samplers import (
 # WebDataset (オプション)
 try:
     import webdataset as wds
+
     HAS_WEBDATASET = True
 except ImportError:
     HAS_WEBDATASET = False
@@ -46,6 +47,7 @@ except ImportError:
 # =============================================================================
 # WebDataset 用ヘルパークラス
 # =============================================================================
+
 
 class WebDatasetClipSampler:
     """
@@ -67,9 +69,7 @@ class WebDatasetClipSampler:
         self.target_frame_rate = target_frame_rate
         self.is_train = is_train
 
-    def _resample_video_idx(
-        self, num_output_frames: int, original_fps: float, new_fps: float
-    ) -> list[int]:
+    def _resample_video_idx(self, num_output_frames: int, original_fps: float, new_fps: float) -> list[int]:
         """
         VideoClips._resample_video_idx と同等のロジック。
 
@@ -82,6 +82,7 @@ class WebDatasetClipSampler:
             元の動画フレームへのインデックスリスト (長さ = num_output_frames)
         """
         import math
+
         step = original_fps / new_fps
         if step == int(step):
             # 整数ステップの場合
@@ -117,16 +118,14 @@ class WebDatasetClipSampler:
             target_fps = math.ceil(self.frames_per_clip / video_duration)
 
         # リサンプリングインデックスを計算
-        resampled_indices = self._resample_video_idx(
-            int(math.floor(resampled_total)), fps, target_fps
-        )
+        resampled_indices = self._resample_video_idx(int(math.floor(resampled_total)), fps, target_fps)
 
         # クリップ可能な範囲を計算
         num_resampled = len(resampled_indices)
         if num_resampled < self.frames_per_clip:
             # それでも足りない場合はインデックスを繰り返し
             repeat_count = (self.frames_per_clip // num_resampled) + 1
-            resampled_indices = (resampled_indices * repeat_count)[:self.frames_per_clip]
+            resampled_indices = (resampled_indices * repeat_count)[: self.frames_per_clip]
             num_resampled = len(resampled_indices)
 
         max_start = num_resampled - self.frames_per_clip
@@ -207,15 +206,14 @@ class WebDatasetFrameTransform:
         """
         # 1. ColorJitter (入力は [0,1] 範囲のテンソル)
         if self.color_jitter is not None:
-            fn_idx, brightness_factor, contrast_factor, saturation_factor, hue_factor = (
-                T.ColorJitter.get_params(
-                    self.color_jitter.brightness,
-                    self.color_jitter.contrast,
-                    self.color_jitter.saturation,
-                    self.color_jitter.hue,
-                )
+            fn_idx, brightness_factor, contrast_factor, saturation_factor, hue_factor = T.ColorJitter.get_params(
+                self.color_jitter.brightness,
+                self.color_jitter.contrast,
+                self.color_jitter.saturation,
+                self.color_jitter.hue,
             )
             from torchvision.transforms import functional as F
+
             for i in range(video.shape[0]):
                 frame = video[i]  # [C, H, W], [0,1] 範囲
                 for fn_id in fn_idx:
@@ -273,9 +271,9 @@ def make_webdataset_transform(
             tensors.append(frame_transform.transform_frame(img))
 
         # clip-level 変換 (Crop/Flip を全フレーム同一座標で適用)
-        video = torch.stack(tensors, dim=0)          # [T, C, H, W]
-        video = frame_transform.transform_clip(video) # [T, C, H, W] (cropped)
-        video = video.permute(1, 0, 2, 3)            # [C, T, H, W]
+        video = torch.stack(tensors, dim=0)  # [T, C, H, W]
+        video = frame_transform.transform_clip(video)  # [T, C, H, W] (cropped)
+        video = video.permute(1, 0, 2, 3)  # [C, T, H, W]
 
         # ラベル
         label_str = sample["cls.txt"].decode("utf-8")
@@ -352,7 +350,6 @@ def create_webdataset_loader(
     actual_workers = num_workers if is_train else 0
     persistent = is_train and actual_workers > 0
 
-
     loader = torch.utils.data.DataLoader(
         dataset,
         batch_size=batch_size,
@@ -388,9 +385,7 @@ def train_one_epoch(
     model.train()
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter("lr", utils.SmoothedValue(window_size=1, fmt="{value}"))
-    metric_logger.add_meter(
-        "clips/s", utils.SmoothedValue(window_size=10, fmt="{value:.3f}")
-    )
+    metric_logger.add_meter("clips/s", utils.SmoothedValue(window_size=10, fmt="{value:.3f}"))
 
     header = f"Epoch: [{epoch}]"
     iteration = 0
@@ -476,9 +471,7 @@ def evaluate_webdataset(model, criterion, data_loader, device, total_iters=None)
         print(" * Clip Acc@1 N/A Clip Acc@5 N/A (no data on this rank)")
         return 0.0
 
-    print(
-        f" * Clip Acc@1 {metric_logger.acc1.global_avg:.3f} Clip Acc@5 {metric_logger.acc5.global_avg:.3f}"
-    )
+    print(f" * Clip Acc@1 {metric_logger.acc1.global_avg:.3f} Clip Acc@5 {metric_logger.acc5.global_avg:.3f}")
     return metric_logger.acc1.global_avg
 
 
@@ -491,14 +484,10 @@ def evaluate(model, criterion, data_loader, num_classes, device):
     num_videos = len(data_loader.dataset.samples)
     print(f"Evaluating {num_videos} videos\n")
     # num_classes = len(data_loader.dataset.classes)
-    agg_preds = torch.zeros(
-        (num_videos, num_classes), dtype=torch.float32, device=device
-    )
+    agg_preds = torch.zeros((num_videos, num_classes), dtype=torch.float32, device=device)
     agg_targets = torch.zeros((num_videos), dtype=torch.int32, device=device)
     with torch.inference_mode():
-        for video, _, target, video_idx in metric_logger.log_every(
-            data_loader, 100, header
-        ):
+        for video, _, target, video_idx in metric_logger.log_every(data_loader, 100, header):
             video = video.to(device, non_blocking=True)
             target = target.to(device, non_blocking=True)
             output = model(video)
@@ -542,18 +531,12 @@ def evaluate(model, criterion, data_loader, num_classes, device):
 
     metric_logger.synchronize_between_processes()
 
-    print(
-        f" * Clip Acc@1 {metric_logger.acc1.global_avg:.3f} Clip Acc@5 {metric_logger.acc5.global_avg:.3f}"
-    )
+    print(f" * Clip Acc@1 {metric_logger.acc1.global_avg:.3f} Clip Acc@5 {metric_logger.acc5.global_avg:.3f}")
     # Reduce the agg_preds and agg_targets from all gpu and show result
     agg_preds = utils.reduce_across_processes(agg_preds)
-    agg_targets = utils.reduce_across_processes(
-        agg_targets, op=torch.distributed.ReduceOp.MAX
-    )
+    agg_targets = utils.reduce_across_processes(agg_targets, op=torch.distributed.ReduceOp.MAX)
     agg_acc1, agg_acc5 = utils.accuracy(agg_preds, agg_targets, topk=(1, 5))
-    print(
-        f" * Video Acc@1 {agg_acc1:.3f} Video Acc@5 {agg_acc5:.3f}"
-    )
+    print(f" * Video Acc@1 {agg_acc1:.3f} Video Acc@5 {agg_acc5:.3f}")
     return metric_logger.acc1.global_avg
 
 
@@ -562,9 +545,7 @@ def _get_cache_path(filepath, args):
 
     value = f"{filepath}-{args.clip_len}-{args.kinetics_version}-{args.frame_rate}"
     h = hashlib.sha1(value.encode()).hexdigest()
-    cache_path = os.path.join(
-        "~", ".torch", "vision", "datasets", "kinetics", h[:10] + ".pt"
-    )
+    cache_path = os.path.join("~", ".torch", "vision", "datasets", "kinetics", h[:10] + ".pt")
     cache_path = os.path.expanduser(cache_path)
     return cache_path
 
@@ -660,6 +641,7 @@ def main(args):
 
         # シャードパターン (存在するシャードを自動検出)
         import glob
+
         if not args.test_only:
             train_shard_files = sorted(glob.glob(os.path.join(args.webdataset_path, "train", "shard-*.tar")))
             if not train_shard_files:
@@ -703,7 +685,7 @@ def main(args):
 
         # augmentation パラメータ
         _color_jitter = None
-        cj = getattr(args, 'color_jitter', None)
+        cj = getattr(args, "color_jitter", None)
         if cj:
             if len(cj) >= 3:
                 _color_jitter = tuple(cj)
@@ -713,14 +695,13 @@ def main(args):
                     f"got {len(cj)}. Ignoring."
                 )
         _rrc_scale = None
-        rrc = getattr(args, 'random_resized_crop_scale', None)
+        rrc = getattr(args, "random_resized_crop_scale", None)
         if rrc:
             if len(rrc) == 2:
                 _rrc_scale = tuple(rrc)
             else:
                 logger.warning(
-                    f"random_resized_crop_scale requires exactly 2 values (min, max), "
-                    f"got {len(rrc)}. Ignoring."
+                    f"random_resized_crop_scale requires exactly 2 values (min, max), got {len(rrc)}. Ignoring."
                 )
 
         if not args.test_only:
@@ -810,9 +791,7 @@ def main(args):
             weights = torchvision.models.get_weight(args.weights)
             transform_test = weights.transforms()
         else:
-            transform_test = presets.VideoClassificationPresetEval(
-                crop_size=val_crop_size, resize_size=val_resize_size
-            )
+            transform_test = presets.VideoClassificationPresetEval(crop_size=val_crop_size, resize_size=val_resize_size)
 
         if args.cache_dataset and os.path.exists(cache_path):
             print(f"Loading dataset_test from {cache_path}")
@@ -820,9 +799,7 @@ def main(args):
             dataset_test.transform = transform_test
         else:
             if args.distributed:
-                print(
-                    "It is recommended to pre-compute the dataset cache on a single-gpu first, as it will be faster"
-                )
+                print("It is recommended to pre-compute the dataset cache on a single-gpu first, as it will be faster")
             dataset_test = KineticsWithVideoId(
                 args.data_path,
                 frames_per_clip=args.clip_len,
@@ -882,31 +859,30 @@ def main(args):
 
     pretrained = is_pytorchvideo_model(args.model) and args.weights == "pretrained"
     weights = None if pretrained else args.weights
-    model = build_model(
-        args.model, num_classes, pretrained=pretrained, weights=weights
-    )
+    model = build_model(args.model, num_classes, pretrained=pretrained, weights=weights)
     model.to(device)
     if args.distributed and args.sync_bn:
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
 
     # layer freezing (config で無効化可能、v4 での全層 fine-tune 用)
-    if getattr(args, 'freeze_backbone', True):
+    if getattr(args, "freeze_backbone", True):
         freeze_backbone(model, args.model)
     else:
         logger.info("Backbone NOT frozen: all parameters are trainable")
 
     model = model.to(device)
-    criterion = nn.CrossEntropyLoss(label_smoothing=getattr(args, 'label_smoothing', 0.0))
+    criterion = nn.CrossEntropyLoss(label_smoothing=getattr(args, "label_smoothing", 0.0))
 
     # MixUp / CutMix
     # alpha=0.0 で各々無効。両方 0.0 なら mixup_cutmix=None (適用なし)。
     # CutMix は空間領域を矩形で置換するため、動画の時間的一貫性を破壊しうる。
     # 有効にする場合は小さい alpha (例: 0.2) から試すこと。
     mixup_cutmix = None
-    mixup_alpha = getattr(args, 'mixup_alpha', 0.0)
-    cutmix_alpha = getattr(args, 'cutmix_alpha', 0.0)
+    mixup_alpha = getattr(args, "mixup_alpha", 0.0)
+    cutmix_alpha = getattr(args, "cutmix_alpha", 0.0)
     if mixup_alpha > 0.0 or cutmix_alpha > 0.0:
         from torchvision.transforms import v2
+
         transforms_list = []
         if mixup_alpha > 0.0:
             transforms_list.append(v2.MixUp(alpha=mixup_alpha, num_classes=num_classes))
@@ -934,19 +910,15 @@ def main(args):
     else:
         iters_per_epoch = 1 if args.test_only else len(data_loader)
         val_iters = None  # mp4モードはlen()サポート
-    lr_scheduler_type = getattr(args, 'lr_scheduler', 'multistep').lower()
-    if lr_scheduler_type == 'cosine':
+    lr_scheduler_type = getattr(args, "lr_scheduler", "multistep").lower()
+    if lr_scheduler_type == "cosine":
         # CosineAnnealingLR: warmup 後の残りイテレーションで cosine decay
         cosine_iters = iters_per_epoch * (args.epochs - args.lr_warmup_epochs)
-        eta_min = getattr(args, 'lr_eta_min', 1e-6)
-        main_lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=cosine_iters, eta_min=eta_min
-        )
+        eta_min = getattr(args, "lr_eta_min", 1e-6)
+        main_lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cosine_iters, eta_min=eta_min)
         logger.info(f"LR scheduler: CosineAnnealing (T_max={cosine_iters}, eta_min={eta_min})")
     else:
-        lr_milestones = [
-            iters_per_epoch * (m - args.lr_warmup_epochs) for m in args.lr_milestones
-        ]
+        lr_milestones = [iters_per_epoch * (m - args.lr_warmup_epochs) for m in args.lr_milestones]
         main_lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
             optimizer, milestones=lr_milestones, gamma=args.lr_gamma
         )
@@ -978,9 +950,10 @@ def main(args):
 
     # EMA (Exponential Moving Average)
     ema_model = None
-    if getattr(args, 'ema_enabled', False):
+    if getattr(args, "ema_enabled", False):
         from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
-        ema_decay = getattr(args, 'ema_decay', 0.999)
+
+        ema_decay = getattr(args, "ema_decay", 0.999)
         ema_model = AveragedModel(model, multi_avg_fn=get_ema_multi_avg_fn(ema_decay))
         logger.info(f"EMA enabled: decay={ema_decay}")
 
@@ -993,13 +966,19 @@ def main(args):
     if args.resume:
         checkpoint = torch.load(args.resume, map_location="cpu", weights_only=False)
         model_without_ddp.load_state_dict(checkpoint["model"])
-        optimizer.load_state_dict(checkpoint["optimizer"])
-        lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
-        args.start_epoch = checkpoint["epoch"] + 1
-        best_acc1_from_ckpt = checkpoint.get("val_acc1", 0.0)
-        if args.amp:
-            scaler.load_state_dict(checkpoint["scaler"])
-        logger.info(f"Resumed from epoch {args.start_epoch - 1}, best_acc1 = {best_acc1_from_ckpt:.3f}")
+        if getattr(args, "resume_weights_only", False):
+            logger.info(
+                f"resume_weights_only: loaded model weights from epoch {checkpoint.get('epoch', '?')}"
+                f" (val_acc1={checkpoint.get('val_acc1', 0.0):.3f}). Optimizer/scheduler/epoch reset."
+            )
+        else:
+            optimizer.load_state_dict(checkpoint["optimizer"])
+            lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
+            args.start_epoch = checkpoint["epoch"] + 1
+            best_acc1_from_ckpt = checkpoint.get("val_acc1", 0.0)
+            if args.amp:
+                scaler.load_state_dict(checkpoint["scaler"])
+            logger.info(f"Resumed from epoch {args.start_epoch - 1}, best_acc1 = {best_acc1_from_ckpt:.3f}")
 
     if args.test_only:
         # We disable the cudnn benchmarking because it can noticeably affect the accuracy
@@ -1044,7 +1023,9 @@ def main(args):
         ema_val_acc1 = None
         if ema_model is not None:
             if args.data_source == "webdataset":
-                ema_val_acc1 = evaluate_webdataset(ema_model, criterion, data_loader_test, device=device, total_iters=val_iters)
+                ema_val_acc1 = evaluate_webdataset(
+                    ema_model, criterion, data_loader_test, device=device, total_iters=val_iters
+                )
             else:
                 ema_val_acc1 = evaluate(ema_model, criterion, data_loader_test, num_classes, device=device)
             logger.info(f"Epoch {epoch}: EMA val_acc1 = {ema_val_acc1:.3f} (base = {val_acc1:.3f})")
@@ -1070,9 +1051,7 @@ def main(args):
                 checkpoint["ema_model"] = ema_model.state_dict()
 
             # latest.pth を常に保存
-            utils.save_on_master(
-                checkpoint, os.path.join(args.output_dir, "latest.pth")
-            )
+            utils.save_on_master(checkpoint, os.path.join(args.output_dir, "latest.pth"))
 
             # best.pth は最良時のみ保存 (旧ファイルは削除してリネーム)
             # EMA と通常モデルの良い方で判定
@@ -1084,11 +1063,10 @@ def main(args):
                 # DDP時は master のみファイル操作 (他ランクが先に削除するとFileNotFoundError)
                 if not args.distributed or args.rank == 0:
                     import glob as _glob
+
                     for old in _glob.glob(os.path.join(args.output_dir, "best_ep*_val1_*.pth")):
                         os.remove(old)
-                utils.save_on_master(
-                    checkpoint, os.path.join(args.output_dir, best_name)
-                )
+                utils.save_on_master(checkpoint, os.path.join(args.output_dir, best_name))
                 logger.info(f"Epoch {epoch}: New best val_acc1 = {effective_acc1:.3f}")
 
     total_time = time.time() - start_time
@@ -1100,13 +1078,9 @@ def main(args):
 def get_args_parser(add_help=True):
     import argparse
 
-    parser = argparse.ArgumentParser(
-        description="PyTorch Video Classification Training", add_help=add_help
-    )
+    parser = argparse.ArgumentParser(description="PyTorch Video Classification Training", add_help=add_help)
 
-    parser.add_argument(
-        "--data-path", default="./full_dataset/", type=str, help="dataset path (mp4モード用)"
-    )
+    parser.add_argument("--data-path", default="./full_dataset/", type=str, help="dataset path (mp4モード用)")
     parser.add_argument(
         "--data-source",
         default="mp4",
@@ -1145,12 +1119,8 @@ def get_args_parser(add_help=True):
         type=str,
         help="device (Use cuda or cpu Default: cuda)",
     )
-    parser.add_argument(
-        "--clip-len", default=8, type=int, metavar="N", help="number of frames per clip"
-    )
-    parser.add_argument(
-        "--frame-rate", default=4, type=int, metavar="N", help="the frame rate"
-    )
+    parser.add_argument("--clip-len", default=8, type=int, metavar="N", help="number of frames per clip")
+    parser.add_argument("--frame-rate", default=4, type=int, metavar="N", help="the frame rate")
     parser.add_argument(
         "--clips-per-video",
         default=1,
@@ -1181,9 +1151,7 @@ def get_args_parser(add_help=True):
         help="number of data loading workers (default: 10)",
     )
     parser.add_argument("--lr", default=0.01, type=float, help="initial learning rate")
-    parser.add_argument(
-        "--momentum", default=0.9, type=float, metavar="M", help="momentum"
-    )
+    parser.add_argument("--momentum", default=0.9, type=float, metavar="M", help="momentum")
     parser.add_argument(
         "--wd",
         "--weight-decay",
@@ -1218,17 +1186,11 @@ def get_args_parser(add_help=True):
         type=str,
         help="the warmup method (default: linear)",
     )
-    parser.add_argument(
-        "--lr-warmup-decay", default=0.001, type=float, help="the decay for lr"
-    )
+    parser.add_argument("--lr-warmup-decay", default=0.001, type=float, help="the decay for lr")
     parser.add_argument("--print-freq", default=10, type=int, help="print frequency")
-    parser.add_argument(
-        "--output-dir", default=".", type=str, help="path to save outputs"
-    )
+    parser.add_argument("--output-dir", default=".", type=str, help="path to save outputs")
     parser.add_argument("--resume", default="", type=str, help="path of checkpoint")
-    parser.add_argument(
-        "--start-epoch", default=0, type=int, metavar="N", help="start epoch"
-    )
+    parser.add_argument("--start-epoch", default=0, type=int, metavar="N", help="start epoch")
     parser.add_argument(
         "--cache-dataset",
         dest="cache_dataset",
@@ -1254,9 +1216,7 @@ def get_args_parser(add_help=True):
     )
 
     # distributed training parameters
-    parser.add_argument(
-        "--world-size", default=1, type=int, help="number of distributed processes"
-    )
+    parser.add_argument("--world-size", default=1, type=int, help="number of distributed processes")
     parser.add_argument(
         "--dist-url",
         default="env://",
@@ -1292,9 +1252,7 @@ def get_args_parser(add_help=True):
         type=int,
         help="the random crop size used for training (default: (112, 112))",
     )
-    parser.add_argument(
-        "--weights", default=None, type=str, help="the weights enum name to load"
-    )
+    parser.add_argument("--weights", default=None, type=str, help="the weights enum name to load")
 
     # Mixed precision training parameters
     parser.add_argument(
@@ -1374,6 +1332,13 @@ def get_args_parser(add_help=True):
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Freeze backbone layers (default: True). Use --no-freeze-backbone to unfreeze.",
+    )
+
+    # Resume options
+    parser.add_argument(
+        "--resume-weights-only",
+        action="store_true",
+        help="When resuming, load model weights only (reset optimizer/scheduler/epoch).",
     )
 
     return parser
