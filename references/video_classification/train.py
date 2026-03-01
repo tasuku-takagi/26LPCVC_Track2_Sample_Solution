@@ -519,7 +519,7 @@ def evaluate(model, criterion, data_loader, num_classes, device):
     if (
         hasattr(data_loader.dataset, "__len__")
         and num_data_from_sampler != num_processed_samples
-        and torch.distributed.get_rank() == 0
+        and utils.get_rank() == 0
     ):
         # See FIXME above
         warnings.warn(
@@ -532,9 +532,11 @@ def evaluate(model, criterion, data_loader, num_classes, device):
     metric_logger.synchronize_between_processes()
 
     print(f" * Clip Acc@1 {metric_logger.acc1.global_avg:.3f} Clip Acc@5 {metric_logger.acc5.global_avg:.3f}")
-    # Reduce the agg_preds and agg_targets from all gpu and show result
-    agg_preds = utils.reduce_across_processes(agg_preds)
-    agg_targets = utils.reduce_across_processes(agg_targets, op=torch.distributed.ReduceOp.MAX)
+    # Reduce the agg_preds and agg_targets from all gpus (safe no-op on single gpu / cpu)
+    if utils.is_dist_avail_and_initialized():
+        torch.distributed.barrier()
+        torch.distributed.all_reduce(agg_preds, op=torch.distributed.ReduceOp.SUM)
+        torch.distributed.all_reduce(agg_targets, op=torch.distributed.ReduceOp.MAX)
     agg_acc1, agg_acc5 = utils.accuracy(agg_preds, agg_targets, topk=(1, 5))
     print(f" * Video Acc@1 {agg_acc1:.3f} Video Acc@5 {agg_acc5:.3f}")
     return metric_logger.acc1.global_avg
