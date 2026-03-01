@@ -5,6 +5,7 @@ qai_hub_models
 onnx
 onnxruntime
 onnxscript
+h5py
 Pillow
 numpy
 av==16.0.1
