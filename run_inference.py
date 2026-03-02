@@ -32,7 +32,7 @@ W = 112
 # The preprocessed .npy tensors are channel-first (NCTHW), so they will be
 # transposed automatically when this is True.
 # Set to False if your model uses channel-first (NCTHW) input (e.g. ONNX compile path).
-IS_DLC_CHANNEL_LAST = False  # True for the official Qualcomm-provided .bin
+IS_DLC_CHANNEL_LAST = True  # True for the official Qualcomm-provided .bin
 
 # Path to the directory of preprocessed .npy tensors.
 data_path = ""
