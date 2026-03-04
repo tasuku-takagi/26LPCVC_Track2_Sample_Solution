@@ -15,7 +15,6 @@ from typing import Any, cast
 
 import qai_hub as hub
 import torch
-
 from qai_hub_models import Precision, TargetRuntime
 from qai_hub_models.configs.metadata_yaml import ModelFileMetadata, ModelMetadata
 from qai_hub_models.configs.tool_versions import ToolVersions
@@ -56,13 +55,9 @@ def quantize_model(
     input_spec = input_spec or model.get_input_spec()
     print(f"Quantizing {model_name}.")
     if not precision.activations_type or not precision.weights_type:
-        raise ValueError(
-            "Quantization is only supported if both weights and activations are quantized."
-        )
+        raise ValueError("Quantization is only supported if both weights and activations are quantized.")
 
-    calibration_data = quantization_utils.get_calibration_data(
-        model, input_spec, num_calibration_samples
-    )
+    calibration_data = quantization_utils.get_calibration_data(model, input_spec, num_calibration_samples)
     return hub.submit_quantize_job(
         model=onnx_model,
         calibration_data=calibration_data,
@@ -88,13 +83,9 @@ def compile_model(
         model_to_compile = source_model
     else:
         # Trace the model
-        model_to_compile = torch.jit.trace(
-            model.to("cpu"), make_torch_inputs(input_spec)
-        )
+        model_to_compile = torch.jit.trace(model.to("cpu"), make_torch_inputs(input_spec))
 
-    model_compile_options = model.get_hub_compile_options(
-        target_runtime, precision, extra_options, device
-    )
+    model_compile_options = model.get_hub_compile_options(target_runtime, precision, extra_options, device)
     print(f"Optimizing model {model_name} to run on-device")
     submitted_compile_job = hub.submit_compile_job(
         model=model_to_compile,
@@ -161,9 +152,7 @@ def download_model(
         dst_path.mkdir()
 
         if target_model.model_type == hub.SourceModelType.ONNX:
-            onnx_result = download_and_unzip_workbench_onnx_model(
-                target_model, dst_path, model_name
-            )
+            onnx_result = download_and_unzip_workbench_onnx_model(target_model, dst_path, model_name)
             model_file_name = onnx_result.onnx_graph_name
         else:
             downloaded_path = target_model.download(os.path.join(dst_path, model_name))
@@ -282,9 +271,7 @@ def export_model(
         * A QuantizeJob object containing metadata about the quantize job submitted to hub
         * The path to the downloaded model folder (or zip), or None if one or more of: skip_downloading is True, fetch_static_assets is set, or AI Hub Workbench is not accessible
     """
-    model_name = get_export_model_name(
-        Model, MODEL_ID, precision, additional_model_kwargs
-    )
+    model_name = get_export_model_name(Model, MODEL_ID, precision, additional_model_kwargs)
     print("Target Runtime: ", target_runtime)
     output_path = Path(output_dir or Path.cwd() / "export_assets")
     if fetch_static_assets or not can_access_qualcomm_ai_hub():
@@ -303,38 +290,35 @@ def export_model(
         )
         return ExportResult(download_path=static_model_path)
 
-    hub_device = hub.get_devices(
-        name=device.name, attributes=device.attributes, os=device.os
-    )[-1]
-    chipset_attr = next(
-        (attr for attr in hub_device.attributes if "chipset" in attr), None
-    )
+    hub_device = hub.get_devices(name=device.name, attributes=device.attributes, os=device.os)[-1]
+    chipset_attr = next((attr for attr in hub_device.attributes if "chipset" in attr), None)
     chipset = chipset_attr.split(":")[-1] if chipset_attr else None
 
     # 1. Instantiates a PyTorch model and converts it to a traced TorchScript format
-    model = Model.from_pretrained(
-        **get_model_kwargs(Model, dict(**additional_model_kwargs, precision=precision))
-    )
-    
+    model = Model.from_pretrained(**get_model_kwargs(Model, dict(**additional_model_kwargs, precision=precision)))
+
     # --- Custom Model Patching (EDITED) ---
     # Replace the final classification head to match your number of output classes.
-    import torch.nn as nn
     import torch
-    num_classes = 92  # TODO: set this to the number of classes in your dataset
+    import torch.nn as nn
+
+    num_classes = additional_model_kwargs.pop("num_classes", 92)
     model.model.fc = nn.Linear(model.model.fc.in_features, num_classes)
 
-    if os.path.exists("./model.pth"):  # Update this path to your model checkpoint
-        ckpt = torch.load("./model.pth", map_location="cpu", weights_only=False)
+    checkpoint = additional_model_kwargs.pop("checkpoint", "./model.pth")
+    if os.path.exists(checkpoint):
+        ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
         model.model.load_state_dict(ckpt["model"] if "model" in ckpt else ckpt, strict=True)
-        
+
     # Provide a real sample input for the inference sanity check.
     # If data_dir is set to a directory of preprocessed .npy tensors, the first
     # tensor found will be used. Otherwise a random tensor is used as a fallback.
+    calibration_data_dir = additional_model_kwargs.pop("calibration_data_dir", "")
+
     def custom_sample_inputs(input_spec=None):
         import numpy as np
 
-        # Update data_dir to match your data preprocessed input tensors 
-        data_dir = ""
+        data_dir = calibration_data_dir
 
         # Read the target frame count from the input_spec the framework passes in.
         # This ensures the tensor always matches what the compiled model was built for
@@ -351,7 +335,9 @@ def export_model(
                         # Enforce frame count
                         current_t = tensor_x.shape[2]
                         if current_t < t_frames:
-                            tensor_x = np.pad(tensor_x, ((0,0),(0,0),(0, t_frames - current_t),(0,0),(0,0)), mode='edge')
+                            tensor_x = np.pad(
+                                tensor_x, ((0, 0), (0, 0), (0, t_frames - current_t), (0, 0), (0, 0)), mode="edge"
+                            )
                         else:
                             tensor_x = tensor_x[:, :, :t_frames, :, :]
                         print(f"Using single sample for inference: {cls}/{f}, shape={tensor_x.shape}")
@@ -366,10 +352,8 @@ def export_model(
 
     # Set the number of input frames. Must match what your model was trained/exported with.
     additional_model_kwargs.setdefault("num_frames", 16)
-    
-    input_spec = model.get_input_spec(
-        **get_input_spec_kwargs(model, additional_model_kwargs)
-    )
+
+    input_spec = model.get_input_spec(**get_input_spec_kwargs(model, additional_model_kwargs))
 
     # 2. Converts the PyTorch model to ONNX and quantizes the ONNX model.
     quantize_job: hub.client.QuantizeJob | None = None
@@ -481,9 +465,7 @@ def export_model(
         assert inference_job.wait().success, "Job failed: " + inference_job.url
         inference_result = inference_job.download_output_data()
         assert inference_result is not None
-        print_inference_metrics(
-            inference_job, inference_result, torch_out, model.get_output_names()
-        )
+        print_inference_metrics(inference_job, inference_result, torch_out, model.get_output_names())
 
     if not skip_summary:
         print_tool_versions(tool_versions, tool_versions_are_from_device_job)
@@ -526,12 +508,17 @@ def main() -> None:
         supported_precision_runtimes=supported_precision_runtimes,
         default_export_device="Dragonwing IQ-9075 EVK",
     )
+    # カスタム引数: src/run_export.py から CLI 経由で注入される
+    parser.add_argument("--num-classes", type=int, default=92, help="Number of output classes")
+    parser.add_argument("--checkpoint", type=str, default="./model.pth", help="Path to model checkpoint")
+    parser.add_argument("--calibration-data-dir", type=str, default="", help="Path to calibration data directory")
     args = parser.parse_args()
-    
+
     import sys
+
     if "--target-runtime" not in sys.argv:
         args.target_runtime = TargetRuntime.QNN_CONTEXT_BINARY
-        
+
     export_model(**vars(args))
 
 
