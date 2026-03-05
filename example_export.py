@@ -303,7 +303,12 @@ def export_model(
     import torch.nn as nn
 
     num_classes = additional_model_kwargs.pop("num_classes", 92)
-    model.model.fc = nn.Linear(model.model.fc.in_features, num_classes)
+    if hasattr(model.model, "fc"):
+        model.model.fc = nn.Linear(model.model.fc.in_features, num_classes)
+    elif hasattr(model.model, "head"):
+        model.model.head = nn.Linear(model.model.head.in_features, num_classes)
+    else:
+        raise AttributeError("Model has no .fc or .head attribute")
 
     checkpoint = additional_model_kwargs.pop("checkpoint", "./model.pth")
     if os.path.exists(checkpoint):
