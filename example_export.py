@@ -315,41 +315,51 @@ def export_model(
         ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
         model.model.load_state_dict(ckpt["model"] if "model" in ckpt else ckpt, strict=True)
 
-    # Provide a real sample input for the inference sanity check.
-    # If data_dir is set to a directory of preprocessed .npy tensors, the first
-    # tensor found will be used. Otherwise a random tensor is used as a fallback.
+    # calibration_data_dir からキャリブレーションデータを読み込む。
+    # quantize 時は複数サンプル、inference sanity check 時は1サンプルを返す。
     calibration_data_dir = additional_model_kwargs.pop("calibration_data_dir", "")
+    num_calibration_samples = additional_model_kwargs.pop("num_calibration_samples", 100)
 
-    def custom_sample_inputs(input_spec=None):
+    def _load_npy_from_dir(data_dir, t_frames, max_samples=None):
+        """data_dir 内の npy を読み込みリストで返す."""
         import numpy as np
 
-        data_dir = calibration_data_dir
-
-        # Read the target frame count from the input_spec the framework passes in.
-        # This ensures the tensor always matches what the compiled model was built for
-        # (e.g. 16 for QNN_CONTEXT_BINARY, 8 if you override num_frames=8).
-        t_frames = input_spec["video"][0][2] if input_spec else 16
-        if os.path.exists(data_dir):
-            for cls in sorted(os.listdir(data_dir)):
-                cls_dir = os.path.join(data_dir, cls)
-                if not os.path.isdir(cls_dir):
+        samples = []
+        if not os.path.exists(data_dir):
+            return samples
+        for cls in sorted(os.listdir(data_dir)):
+            cls_dir = os.path.join(data_dir, cls)
+            if not os.path.isdir(cls_dir):
+                continue
+            for f in sorted(os.listdir(cls_dir)):
+                if not f.endswith(".npy"):
                     continue
-                for f in sorted(os.listdir(cls_dir)):
-                    if f.endswith(".npy"):
-                        tensor_x = np.load(os.path.join(cls_dir, f))
-                        # Enforce frame count
-                        current_t = tensor_x.shape[2]
-                        if current_t < t_frames:
-                            tensor_x = np.pad(
-                                tensor_x, ((0, 0), (0, 0), (0, t_frames - current_t), (0, 0), (0, 0)), mode="edge"
-                            )
-                        else:
-                            tensor_x = tensor_x[:, :, :t_frames, :, :]
-                        print(f"Using single sample for inference: {cls}/{f}, shape={tensor_x.shape}")
-                        return {"video": [tensor_x.astype(np.float32)]}  # ← only 1 tensor
+                tensor_x = np.load(os.path.join(cls_dir, f))
+                current_t = tensor_x.shape[2]
+                if current_t < t_frames:
+                    tensor_x = np.pad(
+                        tensor_x, ((0, 0), (0, 0), (0, t_frames - current_t), (0, 0), (0, 0)), mode="edge"
+                    )
+                else:
+                    tensor_x = tensor_x[:, :, :t_frames, :, :]
+                samples.append(tensor_x.astype(np.float32))
+                if max_samples and len(samples) >= max_samples:
+                    return samples
+        return samples
 
-        # Fallback: random tensor
-        print("No .npy files found — using random tensor for inference.")
+    def custom_sample_inputs(input_spec=None):
+        """キャリブレーション用: calibration_data_dir から複数サンプルを返す."""
+        import numpy as np
+
+        t_frames = input_spec["video"][0][2] if input_spec else 16
+        if calibration_data_dir:
+            samples = _load_npy_from_dir(calibration_data_dir, t_frames, max_samples=num_calibration_samples)
+            if samples:
+                print(f"Loaded {len(samples)} calibration samples from {calibration_data_dir}")
+                return {"video": samples}
+
+        # Fallback: ランダムテンソル1つ
+        print("No calibration data — using random tensor.")
         return {"video": [np.random.randn(1, 3, t_frames, 112, 112).astype(np.float32)]}
 
     model._sample_inputs_impl = custom_sample_inputs
