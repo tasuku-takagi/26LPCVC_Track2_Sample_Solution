@@ -517,6 +517,7 @@ def main() -> None:
     parser.add_argument("--num-classes", type=int, default=92, help="Number of output classes")
     parser.add_argument("--checkpoint", type=str, default="./model.pth", help="Path to model checkpoint")
     parser.add_argument("--calibration-data-dir", type=str, default="", help="Path to calibration data directory")
+    parser.add_argument("--num-calibration-samples", dest="num_calibration_samples", type=int, default=None, help="Number of calibration samples for quantization")
     args = parser.parse_args()
 
     import sys

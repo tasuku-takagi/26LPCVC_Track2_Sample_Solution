@@ -363,6 +363,138 @@ def create_webdataset_loader(
     return loader
 
 
+# =============================================================================
+# マルチクリップ評価用 (WebDataset)
+# =============================================================================
+
+
+def generate_all_clips(
+    frames: list[bytes],
+    fps: float,
+    frames_per_clip: int,
+    target_frame_rate: int,
+) -> list[list[bytes]]:
+    """1動画から全クリップを生成 (VideoClips の step_between_clips=1 と同等).
+
+    Args:
+        frames: 全フレームの JPEG バイト列リスト.
+        fps: 元の FPS.
+        frames_per_clip: クリップあたりフレーム数.
+        target_frame_rate: ターゲット FPS.
+
+    Returns:
+        クリップのリスト。各クリップはフレームバイト列のリスト.
+    """
+    total_frames = len(frames)
+    target_fps = target_frame_rate
+
+    # VideoClips.compute_clips_for_video と同じロジック
+    resampled_total = total_frames * target_fps / fps
+
+    if resampled_total < frames_per_clip:
+        video_duration = total_frames / fps
+        resampled_total = frames_per_clip
+        target_fps = math.ceil(frames_per_clip / video_duration)
+
+    num_resampled = int(math.floor(resampled_total))
+
+    # リサンプリングインデックス (_resample_video_idx と同等)
+    step = fps / target_fps
+    if step == int(step):
+        step_int = int(step)
+        resampled_indices = [i * step_int for i in range(num_resampled)]
+    else:
+        resampled_indices = [int(math.floor(i * step)) for i in range(num_resampled)]
+    resampled_indices = [min(idx, total_frames - 1) for idx in resampled_indices]
+
+    clips: list[list[bytes]] = []
+    if num_resampled < frames_per_clip:
+        # フレーム不足: 繰り返しで1クリップのみ
+        repeat_count = (frames_per_clip // num_resampled) + 1
+        padded = (resampled_indices * repeat_count)[:frames_per_clip]
+        clips.append([frames[i] for i in padded])
+    else:
+        # step_between_clips=1: 全開始位置からクリップ生成
+        for start in range(num_resampled - frames_per_clip + 1):
+            clip_indices = resampled_indices[start : start + frames_per_clip]
+            clips.append([frames[i] for i in clip_indices])
+
+    return clips
+
+
+def _multiclip_collate_fn(batch: list) -> tuple:
+    """マルチクリップ用 collate (video_key を文字列リストとして保持)."""
+    videos = torch.stack([b[0] for b in batch])
+    audios = torch.stack([b[1] for b in batch])
+    labels = torch.tensor([b[2] for b in batch])
+    video_keys = [b[3] for b in batch]
+    return videos, audios, labels, video_keys
+
+
+def create_webdataset_multiclip_loader(
+    shards: list[str],
+    class_to_idx: dict[str, int],
+    batch_size: int,
+    num_workers: int,
+    crop_size: tuple[int, int],
+    frames_per_clip: int,
+    frame_rate: int,
+    distributed: bool = False,
+) -> torch.utils.data.DataLoader:
+    """マルチクリップ評価用 WebDataset DataLoader.
+
+    全動画から全クリップを走査し video_key で動画を識別する。
+    MP4 版の SequentialSampler + evaluate_pytorch_mp4 と同等の動作。
+    """
+    if not HAS_WEBDATASET:
+        raise ImportError("webdataset is required. Install with: pip install webdataset")
+
+    frame_transform = WebDatasetFrameTransform(crop_size=crop_size, is_train=False)
+
+    def multiclip_pipeline(samples):
+        """1動画 → N クリップに展開する compose パイプライン."""
+        for sample in samples:
+            frame_data = pickle.loads(sample["frames.pkl"])
+            if isinstance(frame_data, dict):
+                frames: list[bytes] = frame_data["frames"]
+                fps: float = frame_data["fps"]
+            else:
+                frames = frame_data
+                fps = 30.0
+
+            label_str = sample["cls.txt"].decode("utf-8")
+            label = class_to_idx[label_str]
+            video_key = sample["__key__"]
+
+            for clip_frames in generate_all_clips(frames, fps, frames_per_clip, frame_rate):
+                tensors = []
+                for fb in clip_frames:
+                    img = Image.open(io.BytesIO(fb)).convert("RGB")
+                    tensors.append(frame_transform.transform_frame(img))
+
+                video = torch.stack(tensors, dim=0)  # [T, C, H, W]
+                video = frame_transform.transform_clip(video)  # [T, C, H, W]
+                video = video.permute(1, 0, 2, 3)  # [C, T, H, W]
+
+                audio = torch.empty(0)
+                yield video, audio, label, video_key
+
+    # 分散学習: split_by_node でシャードを各ランクに分割して並列評価
+    nodesplitter = wds.split_by_node if distributed else wds.shardlists.single_node_only
+    dataset = wds.WebDataset(
+        shards, shardshuffle=False, empty_check=False,
+        nodesplitter=nodesplitter,
+    ).compose(multiclip_pipeline)
+
+    return torch.utils.data.DataLoader(
+        dataset,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        pin_memory=True,
+        collate_fn=_multiclip_collate_fn,
+    )
+
+
 def train_one_epoch(
     model,
     criterion,
@@ -473,6 +605,125 @@ def evaluate_webdataset(model, criterion, data_loader, device, total_iters=None)
 
     print(f" * Clip Acc@1 {metric_logger.acc1.global_avg:.3f} Clip Acc@5 {metric_logger.acc5.global_avg:.3f}")
     return metric_logger.acc1.global_avg
+
+
+def evaluate_webdataset_multiclip(model, data_loader, device, distributed=False):
+    """マルチクリップ WebDataset 評価 (clip + video 精度).
+
+    全クリップを走査し、動画ごとに softmax 平均で集計する。
+    MP4 版の evaluate() と同等の評価方法。
+
+    分散学習: 各ランクが担当シャードを評価し、結果を gather して集計。
+
+    Returns:
+        video_acc1 (float): 動画レベル Top-1 精度.
+    """
+    from collections import defaultdict
+
+    model.eval()
+    all_outputs: list[torch.Tensor] = []
+    all_targets: list[torch.Tensor] = []
+    all_video_keys: list[str] = []
+
+    t0 = time.time()
+    rank = torch.distributed.get_rank() if distributed else 0
+    print(f"[multiclip_val] rank {rank} start")
+    with torch.inference_mode():
+        for i, batch in enumerate(data_loader):
+            video, _, target, video_keys = batch
+            video = video.to(device)
+            output = model(video)
+            all_outputs.append(output.cpu())
+            all_targets.append(target)
+            all_video_keys.extend(video_keys)
+            if (i + 1) % 100 == 0 and rank == 0:
+                print(f"[multiclip_val] {i + 1} batches, {len(all_video_keys)} clips")
+
+    local_outputs = torch.cat(all_outputs) if all_outputs else torch.empty(0)
+    local_targets = torch.cat(all_targets) if all_targets else torch.empty(0, dtype=torch.long)
+
+    # 分散: 各ランクの結果を rank 0 に gather
+    if distributed:
+        import pickle as _pickle
+
+        # outputs, targets, video_keys をシリアライズして gather
+        local_data = _pickle.dumps((local_outputs, local_targets, all_video_keys))
+        local_bytes = torch.ByteTensor(list(local_data)).to(device)
+        local_size = torch.tensor([len(local_data)], device=device)
+
+        # 全ランクのサイズを収集
+        world_size = torch.distributed.get_world_size()
+        all_sizes = [torch.tensor([0], device=device) for _ in range(world_size)]
+        torch.distributed.all_gather(all_sizes, local_size)
+
+        max_size = max(s.item() for s in all_sizes)
+        # パディング
+        padded = torch.zeros(max_size, dtype=torch.uint8, device=device)
+        padded[: len(local_data)] = local_bytes
+        all_padded = [torch.zeros(max_size, dtype=torch.uint8, device=device) for _ in range(world_size)]
+        torch.distributed.all_gather(all_padded, padded)
+
+        # rank 0 でデシリアライズして統合
+        if rank == 0:
+            merged_outputs = []
+            merged_targets = []
+            merged_keys: list[str] = []
+            for r in range(world_size):
+                sz = all_sizes[r].item()
+                data = bytes(all_padded[r][:sz].cpu().tolist())
+                r_outputs, r_targets, r_keys = _pickle.loads(data)
+                merged_outputs.append(r_outputs)
+                merged_targets.append(r_targets)
+                merged_keys.extend(r_keys)
+            all_outputs_t = torch.cat(merged_outputs)
+            all_targets_t = torch.cat(merged_targets)
+            all_video_keys = merged_keys
+        else:
+            all_outputs_t = local_outputs
+            all_targets_t = local_targets
+    else:
+        all_outputs_t = local_outputs
+        all_targets_t = local_targets
+
+    total_clips = len(all_video_keys)
+
+    # clip accuracy
+    clip_pred = all_outputs_t.argmax(dim=1)
+    clip_correct = (clip_pred == all_targets_t).sum().item()
+    clip_acc1 = 100.0 * clip_correct / max(total_clips, 1)
+
+    # video accuracy (softmax 平均で集計)
+    video_preds: dict[str, list[torch.Tensor]] = defaultdict(list)
+    video_labels: dict[str, int] = {}
+    for idx, key in enumerate(all_video_keys):
+        video_preds[key].append(all_outputs_t[idx])
+        video_labels[key] = all_targets_t[idx].item()
+
+    video_correct = 0
+    for key in video_preds:
+        logits = torch.stack(video_preds[key])
+        avg_prob = torch.softmax(logits, dim=1).mean(dim=0)
+        if avg_prob.argmax().item() == video_labels[key]:
+            video_correct += 1
+
+    num_videos = len(video_preds)
+    video_acc1 = 100.0 * video_correct / max(num_videos, 1)
+
+    elapsed = time.time() - t0
+    if rank == 0:
+        print(
+            f"[multiclip_val] Clip Acc@1 {clip_acc1:.3f} | Video Acc@1 {video_acc1:.3f}"
+            f" ({total_clips} clips, {num_videos} videos, {elapsed:.1f}s)"
+        )
+        print(f" * Clip Acc@1 {clip_acc1:.3f} Video Acc@1 {video_acc1:.3f} ({total_clips} clips, {num_videos} videos)")
+
+    # video_acc1 を全ランクに broadcast (checkpoint 保存で全ランクが同じ値を使うため)
+    if distributed:
+        acc_tensor = torch.tensor([video_acc1], device=device)
+        torch.distributed.broadcast(acc_tensor, src=0)
+        video_acc1 = acc_tensor.item()
+
+    return video_acc1
 
 
 def evaluate(model, criterion, data_loader, num_classes, device):
@@ -722,19 +973,16 @@ def main(args):
                 color_jitter=_color_jitter,
                 random_resized_crop_scale=_rrc_scale,
             )
-        # 分散学習のvalidationではworker=0が最も安全 (シャード分割の問題を回避)
-        val_workers = 0 if args.distributed else args.workers
-        data_loader_test = create_webdataset_loader(
+        # マルチクリップ評価: 全ランクでシャードを分割して並列評価
+        data_loader_test = create_webdataset_multiclip_loader(
             shards=val_shards,
             class_to_idx=class_to_idx,
             batch_size=args.batch_size,
-            num_workers=val_workers,
-            is_train=False,
+            num_workers=args.workers,
             crop_size=val_crop_size,
             frames_per_clip=args.clip_len,
             frame_rate=args.frame_rate,
             distributed=args.distributed,
-            epoch_length=val_epoch_length,
         )
 
         # WebDatasetはlen()未サポートのため、概算値を使用
@@ -987,7 +1235,10 @@ def main(args):
         torch.backends.cudnn.benchmark = False
         torch.backends.cudnn.deterministic = True
         if args.data_source == "webdataset":
-            evaluate_webdataset(model, criterion, data_loader_test, device=device, total_iters=val_iters)
+            _eval_model = model_without_ddp if args.distributed else model
+            evaluate_webdataset_multiclip(
+                _eval_model, data_loader_test, device=device, distributed=args.distributed,
+            )
         else:
             evaluate(model, criterion, data_loader_test, num_classes, device=device)
         return
@@ -1017,7 +1268,10 @@ def main(args):
         )
 
         if args.data_source == "webdataset":
-            val_acc1 = evaluate_webdataset(model, criterion, data_loader_test, device=device, total_iters=val_iters)
+            _eval_model = model_without_ddp if args.distributed else model
+            val_acc1 = evaluate_webdataset_multiclip(
+                _eval_model, data_loader_test, device=device, distributed=args.distributed,
+            )
         else:
             val_acc1 = evaluate(model, criterion, data_loader_test, num_classes, device=device)
 
@@ -1025,8 +1279,8 @@ def main(args):
         ema_val_acc1 = None
         if ema_model is not None:
             if args.data_source == "webdataset":
-                ema_val_acc1 = evaluate_webdataset(
-                    ema_model, criterion, data_loader_test, device=device, total_iters=val_iters
+                ema_val_acc1 = evaluate_webdataset_multiclip(
+                    ema_model, data_loader_test, device=device, distributed=args.distributed,
                 )
             else:
                 ema_val_acc1 = evaluate(ema_model, criterion, data_loader_test, num_classes, device=device)
