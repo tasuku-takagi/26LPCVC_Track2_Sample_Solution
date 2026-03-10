@@ -929,10 +929,31 @@ def main(args):
                 val_samples = 10000  # fallback
         print(f"Val samples: {val_samples}")
 
+        # train サンプル数を取得 (引数 or meta.txt から自動取得)
+        if not args.test_only:
+            if args.webdataset_samples > 0:
+                train_samples = args.webdataset_samples
+            else:
+                train_meta_file = os.path.join(args.webdataset_path, "train", "meta.txt")
+                if os.path.exists(train_meta_file):
+                    with open(train_meta_file) as f:
+                        for line in f:
+                            if line.startswith("num_samples:"):
+                                train_samples = int(line.split(":")[1].strip())
+                                break
+                        else:
+                            raise ValueError(f"num_samples not found in {train_meta_file}")
+                else:
+                    raise FileNotFoundError(
+                        f"Train meta.txt not found: {train_meta_file}. "
+                        "Specify --webdataset-samples or create meta.txt with create_webdataset.py"
+                    )
+            print(f"Train samples: {train_samples}")
+
         # 分散学習で各rankが同じイテレーション数になるようepoch_lengthを設定
         # (NCCLデッドロック回避のため必須)
         if not args.test_only:
-            train_epoch_length = args.webdataset_samples // max(1, args.world_size)
+            train_epoch_length = train_samples // max(1, args.world_size)
         # val 全体を使用 (切り上げで全サンプルをカバー)
         val_epoch_length = math.ceil(val_samples / max(1, args.world_size))
 
@@ -1153,7 +1174,7 @@ def main(args):
     # between different epochs
     if args.data_source == "webdataset":
         # WebDatasetはlen()をサポートしないため、サンプル数から推定
-        iters_per_epoch = args.webdataset_samples // (args.batch_size * max(1, args.world_size))
+        iters_per_epoch = train_samples // (args.batch_size * max(1, args.world_size))
         # val 全体を評価 (切り上げで全サンプルをカバー)
         val_iters = math.ceil(val_epoch_length / args.batch_size)
         logger.info(f"Train iters/epoch: {iters_per_epoch}, Val iters: {val_iters} (samples: {val_samples})")
@@ -1352,9 +1373,9 @@ def get_args_parser(add_help=True):
     )
     parser.add_argument(
         "--webdataset-samples",
-        default=190000,
+        default=0,
         type=int,
-        help="WebDatasetの学習サンプル数 (LRスケジューラ用、概算でOK)",
+        help="WebDatasetの学習サンプル数 (0の場合はmeta.txtから自動取得)",
     )
     parser.add_argument(
         "--webdataset-val-samples",
