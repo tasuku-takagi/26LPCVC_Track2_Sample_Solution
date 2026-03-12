@@ -295,24 +295,38 @@ def export_model(
     chipset = chipset_attr.split(":")[-1] if chipset_attr else None
 
     # 1. Instantiates a PyTorch model and converts it to a traced TorchScript format
-    model = Model.from_pretrained(**get_model_kwargs(Model, dict(**additional_model_kwargs, precision=precision)))
-
-    # --- Custom Model Patching (EDITED) ---
-    # Replace the final classification head to match your number of output classes.
     import torch
     import torch.nn as nn
 
+    custom_model = additional_model_kwargs.pop("model_name", None)
     num_classes = additional_model_kwargs.pop("num_classes", 92)
-    if hasattr(model.model, "fc"):
-        model.model.fc = nn.Linear(model.model.fc.in_features, num_classes)
-    elif hasattr(model.model, "head"):
-        model.model.head = nn.Linear(model.model.head.in_features, num_classes)
-    else:
-        raise AttributeError("Model has no .fc or .head attribute")
-
     checkpoint = additional_model_kwargs.pop("checkpoint", "./model.pth")
-    if os.path.exists(checkpoint):
-        ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
+
+    if custom_model and custom_model != "r2plus1d_18":
+        # --- VideoModelWrapper パス: 任意モデル対応 ---
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from src.hub_model_wrapper import VideoModelWrapper
+        model = VideoModelWrapper.from_pretrained(
+            custom_model,
+            num_classes=num_classes,
+            checkpoint_path=checkpoint if os.path.exists(checkpoint) else None,
+        )
+    else:
+        # --- 従来パス: R(2+1)D-18 ---
+        model = Model.from_pretrained(**get_model_kwargs(Model, dict(**additional_model_kwargs, precision=precision)))
+
+        # --- Custom Model Patching (EDITED) ---
+        # Replace the final classification head to match your number of output classes.
+        if hasattr(model.model, "fc"):
+            model.model.fc = nn.Linear(model.model.fc.in_features, num_classes)
+        elif hasattr(model.model, "head"):
+            model.model.head = nn.Linear(model.model.head.in_features, num_classes)
+        else:
+            raise AttributeError("Model has no .fc or .head attribute")
+
+        if os.path.exists(checkpoint):
+            ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
         model.model.load_state_dict(ckpt["model"] if "model" in ckpt else ckpt, strict=True)
 
     # calibration_data_dir からキャリブレーションデータを読み込む。
@@ -524,6 +538,7 @@ def main() -> None:
         default_export_device="Dragonwing IQ-9075 EVK",
     )
     # カスタム引数: src/run_export.py から CLI 経由で注入される
+    parser.add_argument("--model-name", type=str, default=None, help="Model name for VideoModelWrapper (non-r2plus1d_18 models)")
     parser.add_argument("--num-classes", type=int, default=92, help="Number of output classes")
     parser.add_argument("--checkpoint", type=str, default="./model.pth", help="Path to model checkpoint")
     parser.add_argument("--calibration-data-dir", type=str, default="", help="Path to calibration data directory")
