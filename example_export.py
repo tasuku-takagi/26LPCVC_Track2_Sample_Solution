@@ -327,7 +327,7 @@ def export_model(
 
         if os.path.exists(checkpoint):
             ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
-        model.model.load_state_dict(ckpt["model"] if "model" in ckpt else ckpt, strict=True)
+            model.model.load_state_dict(ckpt["model"] if "model" in ckpt else ckpt, strict=True)
 
     # calibration_data_dir からキャリブレーションデータを読み込む。
     # quantize 時は複数サンプル、inference sanity check 時は1サンプルを返す。
