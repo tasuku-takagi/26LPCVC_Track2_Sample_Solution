@@ -43,6 +43,14 @@ try:
 except ImportError:
     HAS_WEBDATASET = False
 
+# decord (MP4直接デコード用、オプション)
+try:
+    import decord
+
+    HAS_DECORD = True
+except ImportError:
+    HAS_DECORD = False
+
 
 # =============================================================================
 # WebDataset 用ヘルパークラス
@@ -142,6 +150,146 @@ class WebDatasetClipSampler:
         clip_indices = [min(idx, total_frames - 1) for idx in clip_indices]
 
         return [frames[idx] for idx in clip_indices]
+
+    def sample_n_clips(self, frames: list[bytes], fps: float, n: int) -> list[list[bytes]]:
+        """
+        1動画からN個のランダムクリップをサンプリング。
+
+        Args:
+            frames: 全フレームのJPEGバイト列リスト
+            fps: 動画の元FPS
+            n: サンプリングするクリップ数
+
+        Returns:
+            クリップのリスト (各クリップは frames_per_clip 個のフレームバイト列)
+        """
+        total_frames = len(frames)
+        target_fps = self.target_frame_rate
+
+        # VideoClips.compute_clips_for_video と同じロジック
+        resampled_total = total_frames * target_fps / fps
+
+        if resampled_total < self.frames_per_clip:
+            video_duration = total_frames / fps
+            resampled_total = self.frames_per_clip
+            target_fps = math.ceil(self.frames_per_clip / video_duration)
+
+        resampled_indices = self._resample_video_idx(int(math.floor(resampled_total)), fps, target_fps)
+
+        num_resampled = len(resampled_indices)
+        if num_resampled < self.frames_per_clip:
+            repeat_count = (self.frames_per_clip // num_resampled) + 1
+            resampled_indices = (resampled_indices * repeat_count)[: self.frames_per_clip]
+            num_resampled = len(resampled_indices)
+
+        max_start = max(0, num_resampled - self.frames_per_clip)
+
+        clips = []
+        for _ in range(n):
+            start = random.randint(0, max_start) if max_start > 0 else 0
+            clip_indices = resampled_indices[start : start + self.frames_per_clip]
+            clip_indices = [min(idx, total_frames - 1) for idx in clip_indices]
+            clips.append([frames[idx] for idx in clip_indices])
+        return clips
+
+
+class MP4ClipSampler:
+    """
+    MP4バイトからdecordでデコードしてクリップをサンプリング。
+
+    WebDatasetClipSampler と同じ _resample_video_idx ロジックを使用。
+    デコード後に 128x171 にリサイズして PIL Image リストを返す。
+    """
+
+    def __init__(
+        self,
+        frames_per_clip: int = 8,
+        target_frame_rate: int = 4,
+        resize: tuple[int, int] = (128, 171),
+    ):
+        self.frames_per_clip = frames_per_clip
+        self.target_frame_rate = target_frame_rate
+        self.resize = resize  # (H, W)
+
+    def _resample_video_idx(self, num_output_frames: int, original_fps: float, new_fps: float) -> list[int]:
+        """VideoClips._resample_video_idx と同等のロジック。"""
+        step = original_fps / new_fps
+        if step == int(step):
+            step = int(step)
+            return [i * step for i in range(num_output_frames)]
+        else:
+            return [int(math.floor(i * step)) for i in range(num_output_frames)]
+
+    def _get_resampled_indices(self, total_frames: int, fps: float) -> tuple[list[int], int]:
+        """リサンプリングインデックスと有効範囲を返す。"""
+        target_fps = self.target_frame_rate
+        resampled_total = total_frames * target_fps / fps
+
+        if resampled_total < self.frames_per_clip:
+            video_duration = total_frames / fps
+            resampled_total = self.frames_per_clip
+            target_fps = math.ceil(self.frames_per_clip / video_duration)
+
+        resampled_indices = self._resample_video_idx(int(math.floor(resampled_total)), fps, target_fps)
+
+        num_resampled = len(resampled_indices)
+        if num_resampled < self.frames_per_clip:
+            repeat_count = (self.frames_per_clip // num_resampled) + 1
+            resampled_indices = (resampled_indices * repeat_count)[: self.frames_per_clip]
+            num_resampled = len(resampled_indices)
+
+        max_start = max(0, num_resampled - self.frames_per_clip)
+        return resampled_indices, max_start
+
+    def _decode_frames(self, mp4_bytes: bytes, frame_indices: list[int]) -> list[Image.Image]:
+        """decordで指定フレームをデコードしてリサイズ済みPIL Imageリストを返す。"""
+        vr = decord.VideoReader(io.BytesIO(mp4_bytes))
+        # インデックスをクリップ
+        total = len(vr)
+        safe_indices = [min(idx, total - 1) for idx in frame_indices]
+        # バッチデコード
+        frames_np = vr.get_batch(safe_indices).asnumpy()  # (N, H, W, C) RGB
+        images = []
+        for frame in frames_np:
+            img = Image.fromarray(frame)
+            img = img.resize((self.resize[1], self.resize[0]), Image.BILINEAR)
+            images.append(img)
+        return images
+
+    def __call__(self, mp4_bytes: bytes) -> list[Image.Image]:
+        """MP4バイトから1クリップをサンプリングしてPIL Imageリストを返す。"""
+        vr = decord.VideoReader(io.BytesIO(mp4_bytes))
+        total_frames = len(vr)
+        fps = float(vr.get_avg_fps())
+        del vr  # メモリ解放
+
+        resampled_indices, max_start = self._get_resampled_indices(total_frames, fps)
+        start = random.randint(0, max_start) if max_start > 0 else 0
+        clip_indices = resampled_indices[start : start + self.frames_per_clip]
+
+        return self._decode_frames(mp4_bytes, clip_indices)
+
+    def sample_n_clips(self, mp4_bytes: bytes, n: int) -> list[list[Image.Image]]:
+        """MP4バイトからN個のランダムクリップをサンプリング。"""
+        vr = decord.VideoReader(io.BytesIO(mp4_bytes))
+        total_frames = len(vr)
+        fps = float(vr.get_avg_fps())
+
+        resampled_indices, max_start = self._get_resampled_indices(total_frames, fps)
+
+        clips = []
+        for _ in range(n):
+            start = random.randint(0, max_start) if max_start > 0 else 0
+            clip_indices = resampled_indices[start : start + self.frames_per_clip]
+            safe_indices = [min(idx, total_frames - 1) for idx in clip_indices]
+            frames_np = vr.get_batch(safe_indices).asnumpy()
+            images = []
+            for frame in frames_np:
+                img = Image.fromarray(frame)
+                img = img.resize((self.resize[1], self.resize[0]), Image.BILINEAR)
+                images.append(img)
+            clips.append(images)
+        return clips
 
 
 class WebDatasetFrameTransform:
@@ -363,6 +511,162 @@ def create_webdataset_loader(
     return loader
 
 
+def create_webdataset_multiclip_train_loader(
+    shards: str,
+    class_to_idx: dict[str, int],
+    batch_size: int,
+    num_workers: int,
+    crop_size: tuple[int, int],
+    frames_per_clip: int,
+    frame_rate: int,
+    clips_per_video: int = 4,
+    shuffle_buffer: int = 5000,
+    distributed: bool = False,
+    epoch_length: int | None = None,
+    color_jitter: tuple[float, ...] | None = None,
+    random_resized_crop_scale: tuple[float, float] | None = None,
+) -> torch.utils.data.DataLoader:
+    """
+    マルチクリップ学習用 WebDataset DataLoader。
+
+    1動画からN個のクリップを抽出 → flatten → shuffle → decode+augment の順で処理。
+    メモリ効率のため、シャッフルは生バイトの段階で行い、
+    デコード・augmentはシャッフル後に適用する。
+
+    対応フォーマット:
+    - frames.pkl (JPEGフレーム + FPS): 従来のWebDataset
+    - video.mp4 (生MP4バイト): create_webdataset_mp4.py で作成
+
+    パイプライン:
+        .shuffle(500)                    # 動画レベルのpre-shuffle
+        .compose(multiclip_flatten)      # 1動画 → N個の生クリップdict
+        .shuffle(shuffle_buffer)         # クリップレベルの大バッファshuffle (生バイト)
+        .map(clip_transform)             # decode + augment → tensor
+    """
+    if not HAS_WEBDATASET:
+        raise ImportError("webdataset is required. Install with: pip install webdataset")
+
+    # frames.pkl フォーマット用のクリップサンプラー
+    pkl_clip_sampler = WebDatasetClipSampler(
+        frames_per_clip=frames_per_clip,
+        target_frame_rate=frame_rate,
+        is_train=True,
+    )
+
+    # MP4 フォーマット用のクリップサンプラー
+    mp4_clip_sampler = None
+    if HAS_DECORD:
+        mp4_clip_sampler = MP4ClipSampler(
+            frames_per_clip=frames_per_clip,
+            target_frame_rate=frame_rate,
+            resize=(128, 171),
+        )
+
+    frame_transform = WebDatasetFrameTransform(
+        crop_size=crop_size,
+        is_train=True,
+        color_jitter=color_jitter,
+        random_resized_crop_scale=random_resized_crop_scale,
+    )
+
+    def multiclip_flatten(samples):
+        """1動画 → N個の生クリップdictに展開。メモリ効率のためデコードしない。"""
+        for sample in samples:
+            label_str = sample["cls.txt"].decode("utf-8")
+            label = class_to_idx[label_str]
+
+            if "video.mp4" in sample:
+                # MP4フォーマット: 生バイトとメタ情報のみ保持
+                if mp4_clip_sampler is None:
+                    raise ImportError("decord is required for MP4 WebDataset format. Install with: pip install decord")
+                mp4_bytes = sample["video.mp4"]
+                # decordでフレーム情報を取得してクリップ位置を決定
+                vr = decord.VideoReader(io.BytesIO(mp4_bytes))
+                total_frames = len(vr)
+                fps = float(vr.get_avg_fps())
+                del vr
+
+                resampled_indices, max_start = mp4_clip_sampler._get_resampled_indices(total_frames, fps)
+                for _ in range(clips_per_video):
+                    start = random.randint(0, max_start) if max_start > 0 else 0
+                    clip_indices = resampled_indices[start : start + frames_per_clip]
+                    clip_indices = [min(idx, total_frames - 1) for idx in clip_indices]
+                    yield {
+                        "_format": "mp4",
+                        "_mp4_bytes": mp4_bytes,
+                        "_clip_indices": clip_indices,
+                        "_label": label,
+                    }
+            else:
+                # frames.pkl フォーマット
+                frame_data = pickle.loads(sample["frames.pkl"])
+                if isinstance(frame_data, dict):
+                    frames: list[bytes] = frame_data["frames"]
+                    fps: float = frame_data["fps"]
+                else:
+                    frames = frame_data
+                    fps = 30.0
+
+                for clip_frames in pkl_clip_sampler.sample_n_clips(frames, fps, clips_per_video):
+                    yield {
+                        "_format": "pkl",
+                        "_clip_frames": clip_frames,
+                        "_label": label,
+                    }
+
+    def clip_transform(raw_clip: dict) -> tuple[torch.Tensor, torch.Tensor, int, int]:
+        """生クリップdictをデコード・augment → (video, audio, label, video_idx)."""
+        label = raw_clip["_label"]
+
+        if raw_clip["_format"] == "mp4":
+            # decordでデコード + リサイズ
+            vr = decord.VideoReader(io.BytesIO(raw_clip["_mp4_bytes"]))
+            frames_np = vr.get_batch(raw_clip["_clip_indices"]).asnumpy()
+            tensors = []
+            for frame in frames_np:
+                img = Image.fromarray(frame)
+                img = img.resize((171, 128), Image.BILINEAR)  # (W, H)
+                tensors.append(frame_transform.transform_frame(img))
+        else:
+            # frames.pkl: JPEGバイトをデコード
+            tensors = []
+            for frame_bytes in raw_clip["_clip_frames"]:
+                img = Image.open(io.BytesIO(frame_bytes)).convert("RGB")
+                tensors.append(frame_transform.transform_frame(img))
+
+        video = torch.stack(tensors, dim=0)  # [T, C, H, W]
+        video = frame_transform.transform_clip(video)  # [T, C, H, W]
+        video = video.permute(1, 0, 2, 3)  # [C, T, H, W]
+
+        audio = torch.empty(0)
+        video_idx = 0
+        return video, audio, label, video_idx
+
+    nodesplitter = wds.split_by_node if distributed else wds.shardlists.single_node_only
+
+    dataset = (
+        wds.WebDataset(shards, shardshuffle=True, nodesplitter=nodesplitter, empty_check=False)
+        .shuffle(500)
+        .compose(multiclip_flatten)
+        .shuffle(shuffle_buffer)
+        .map(clip_transform)
+        .repeat()
+        .with_epoch(epoch_length if epoch_length else 10000)
+    )
+
+    loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        pin_memory=True,
+        drop_last=True,
+        collate_fn=collate_fn,
+        persistent_workers=num_workers > 0,
+    )
+
+    return loader
+
+
 # =============================================================================
 # マルチクリップ評価用 (WebDataset)
 # =============================================================================
@@ -482,7 +786,9 @@ def create_webdataset_multiclip_loader(
     # 分散学習: split_by_node でシャードを各ランクに分割して並列評価
     nodesplitter = wds.split_by_node if distributed else wds.shardlists.single_node_only
     dataset = wds.WebDataset(
-        shards, shardshuffle=False, empty_check=False,
+        shards,
+        shardshuffle=False,
+        empty_check=False,
         nodesplitter=nodesplitter,
     ).compose(multiclip_pipeline)
 
@@ -953,7 +1259,8 @@ def main(args):
         # 分散学習で各rankが同じイテレーション数になるようepoch_lengthを設定
         # (NCCLデッドロック回避のため必須)
         if not args.test_only:
-            train_epoch_length = train_samples // max(1, args.world_size)
+            _cpv = getattr(args, "clips_per_video", 1)
+            train_epoch_length = (train_samples * max(1, _cpv)) // max(1, args.world_size)
         # val 全体を使用 (切り上げで全サンプルをカバー)
         val_epoch_length = math.ceil(val_samples / max(1, args.world_size))
 
@@ -979,32 +1286,70 @@ def main(args):
                 )
 
         if not args.test_only:
-            print("Creating WebDataset data loaders")
-            data_loader = create_webdataset_loader(
-                shards=train_shards,
+            _train_cpv = getattr(args, "clips_per_video", 1)
+            _train_shuffle_buf = getattr(args, "train_shuffle_buffer", 5000)
+            if _train_cpv > 1:
+                print(
+                    f"Creating WebDataset multi-clip train loader "
+                    f"(clips_per_video={_train_cpv}, shuffle_buffer={_train_shuffle_buf})"
+                )
+                data_loader = create_webdataset_multiclip_train_loader(
+                    shards=train_shards,
+                    class_to_idx=class_to_idx,
+                    batch_size=args.batch_size,
+                    num_workers=args.workers,
+                    crop_size=train_crop_size,
+                    frames_per_clip=args.clip_len,
+                    frame_rate=args.frame_rate,
+                    clips_per_video=_train_cpv,
+                    shuffle_buffer=_train_shuffle_buf,
+                    distributed=args.distributed,
+                    epoch_length=train_epoch_length,
+                    color_jitter=_color_jitter,
+                    random_resized_crop_scale=_rrc_scale,
+                )
+            else:
+                print("Creating WebDataset data loaders")
+                data_loader = create_webdataset_loader(
+                    shards=train_shards,
+                    class_to_idx=class_to_idx,
+                    batch_size=args.batch_size,
+                    num_workers=args.workers,
+                    is_train=True,
+                    crop_size=train_crop_size,
+                    frames_per_clip=args.clip_len,
+                    frame_rate=args.frame_rate,
+                    distributed=args.distributed,
+                    epoch_length=train_epoch_length,
+                    color_jitter=_color_jitter,
+                    random_resized_crop_scale=_rrc_scale,
+                )
+        # val ローダー: val_mode に応じて multiclip / singleclip を切り替え
+        val_mode = getattr(args, "val_mode", "multiclip")
+        if val_mode == "singleclip":
+            data_loader_test = create_webdataset_loader(
+                shards=val_shards,
                 class_to_idx=class_to_idx,
                 batch_size=args.batch_size,
                 num_workers=args.workers,
-                is_train=True,
-                crop_size=train_crop_size,
+                is_train=False,
+                crop_size=val_crop_size,
                 frames_per_clip=args.clip_len,
                 frame_rate=args.frame_rate,
                 distributed=args.distributed,
-                epoch_length=train_epoch_length,
-                color_jitter=_color_jitter,
-                random_resized_crop_scale=_rrc_scale,
+                epoch_length=val_epoch_length,
             )
-        # マルチクリップ評価: 全ランクでシャードを分割して並列評価
-        data_loader_test = create_webdataset_multiclip_loader(
-            shards=val_shards,
-            class_to_idx=class_to_idx,
-            batch_size=args.batch_size,
-            num_workers=args.workers,
-            crop_size=val_crop_size,
-            frames_per_clip=args.clip_len,
-            frame_rate=args.frame_rate,
-            distributed=args.distributed,
-        )
+        else:
+            data_loader_test = create_webdataset_multiclip_loader(
+                shards=val_shards,
+                class_to_idx=class_to_idx,
+                batch_size=args.batch_size,
+                num_workers=args.workers,
+                crop_size=val_crop_size,
+                frames_per_clip=args.clip_len,
+                frame_rate=args.frame_rate,
+                distributed=args.distributed,
+            )
 
         # WebDatasetはlen()未サポートのため、概算値を使用
         dataset_classes = classes
@@ -1175,9 +1520,11 @@ def main(args):
     if args.data_source == "webdataset":
         # WebDatasetはlen()をサポートしないため、サンプル数から推定
         iters_per_epoch = train_samples // (args.batch_size * max(1, args.world_size))
-        # val 全体を評価 (切り上げで全サンプルをカバー)
+        # val_iters: singleclip モードのみ使用 (multiclip は全データ走査)
         val_iters = math.ceil(val_epoch_length / args.batch_size)
-        logger.info(f"Train iters/epoch: {iters_per_epoch}, Val iters: {val_iters} (samples: {val_samples})")
+        logger.info(
+            f"Train iters/epoch: {iters_per_epoch}, Val iters: {val_iters} (samples: {val_samples}, mode: {val_mode})"
+        )
     else:
         iters_per_epoch = 1 if args.test_only else len(data_loader)
         val_iters = None  # mp4モードはlen()サポート
@@ -1251,17 +1598,33 @@ def main(args):
                 scaler.load_state_dict(checkpoint["scaler"])
             logger.info(f"Resumed from epoch {args.start_epoch - 1}, best_acc1 = {best_acc1_from_ckpt:.3f}")
 
+    # val 評価関数: val_mode に応じて切り替え
+    def _evaluate(eval_model):
+        if args.data_source == "webdataset":
+            if val_mode == "singleclip":
+                return evaluate_webdataset(
+                    eval_model,
+                    criterion,
+                    data_loader_test,
+                    device,
+                    total_iters=val_iters,
+                )
+            else:
+                _m = model_without_ddp if args.distributed else eval_model
+                return evaluate_webdataset_multiclip(
+                    _m,
+                    data_loader_test,
+                    device=device,
+                    distributed=args.distributed,
+                )
+        else:
+            return evaluate(eval_model, criterion, data_loader_test, num_classes, device=device)
+
     if args.test_only:
         # We disable the cudnn benchmarking because it can noticeably affect the accuracy
         torch.backends.cudnn.benchmark = False
         torch.backends.cudnn.deterministic = True
-        if args.data_source == "webdataset":
-            _eval_model = model_without_ddp if args.distributed else model
-            evaluate_webdataset_multiclip(
-                _eval_model, data_loader_test, device=device, distributed=args.distributed,
-            )
-        else:
-            evaluate(model, criterion, data_loader_test, num_classes, device=device)
+        _evaluate(model)
         return
 
     logger.info("Start training")
@@ -1288,23 +1651,12 @@ def main(args):
             ema_model=ema_model,
         )
 
-        if args.data_source == "webdataset":
-            _eval_model = model_without_ddp if args.distributed else model
-            val_acc1 = evaluate_webdataset_multiclip(
-                _eval_model, data_loader_test, device=device, distributed=args.distributed,
-            )
-        else:
-            val_acc1 = evaluate(model, criterion, data_loader_test, num_classes, device=device)
+        val_acc1 = _evaluate(model)
 
         # EMA モデルでも評価
         ema_val_acc1 = None
         if ema_model is not None:
-            if args.data_source == "webdataset":
-                ema_val_acc1 = evaluate_webdataset_multiclip(
-                    ema_model, data_loader_test, device=device, distributed=args.distributed,
-                )
-            else:
-                ema_val_acc1 = evaluate(ema_model, criterion, data_loader_test, num_classes, device=device)
+            ema_val_acc1 = _evaluate(ema_model)
             logger.info(f"Epoch {epoch}: EMA val_acc1 = {ema_val_acc1:.3f} (base = {val_acc1:.3f})")
 
         # メトリクスログ
@@ -1601,6 +1953,23 @@ def get_args_parser(add_help=True):
         type=float,
         metavar=("MIN", "MAX"),
         help="RandomResizedCrop scale range (default: disabled, use RandomCrop)",
+    )
+
+    # Validation mode
+    parser.add_argument(
+        "--val-mode",
+        default="multiclip",
+        type=str,
+        choices=["multiclip", "singleclip"],
+        help="Validation mode: multiclip (video-level accuracy) or singleclip (clip-level, faster)",
+    )
+
+    # Multi-clip training
+    parser.add_argument(
+        "--train-shuffle-buffer",
+        default=5000,
+        type=int,
+        help="Shuffle buffer size for multi-clip training pipeline (default: 5000)",
     )
 
     # Backbone freezing
