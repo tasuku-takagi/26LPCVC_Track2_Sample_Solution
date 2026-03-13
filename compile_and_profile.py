@@ -70,7 +70,7 @@ def main():
 
     # Input name must match the name used in torch.onnx.export(input_names=[...])
     input_specs = {
-        "video": ((BATCH, C, T, H, W), "float32")
+        "video": ((BATCH, T, H, W, C), "float32")
     }
 
     print("\nSubmitting compilation job to QAI Hub...")
